@@ -1,4 +1,7 @@
 #!/usr/bin/env Rscript
+# Legacy standalone pipeline: embedded inference functions do not inherit
+# package updates. Use ripple::run_ripple() for the current package behavior.
+# Permutations here retain full-cell-pool pseudo-query sampling.
 #' =============================================================================
 #' RIPPLE Stage 1: Distance Correlation Analysis (Poisson GLM)
 #' =============================================================================
@@ -317,34 +320,49 @@ run_permutation_test <- function(count_vec, coords_target, coords_all,
   unique_samples <- names(query_per_sample)
 
   for (i in seq_len(n_perms)) {
-    # STRATIFIED SAMPLING: Sample pseudo-query cells WITHIN each sample
-    pseudo_query_coords_list <- lapply(unique_samples, function(samp) {
-      samp_mask <- sample_ids_all == samp
-      samp_coords <- coords_all[samp_mask, , drop = FALSE]
+    # STRATIFIED SAMPLING: draw pseudo-query cells WITHIN each sample, AND
+    # search within each sample.
+    #
+    # Drawing per sample but then rbind-ing the draws and running one pooled
+    # RANN::nn2 over all target cells is stratified in COUNT but not in SPACE.
+    # Because sections routinely share a coordinate frame, that pooled search
+    # returns pseudo-query cells from other samples, so the null carries the
+    # same defect as a pooled observed statistic and the p-value comes out
+    # plausible either way. Both the draw and the search must be per sample.
+    perm_distances <- rep(NA_real_, nrow(coords_target))
+    n_pseudo_total <- 0L
+
+    for (samp in unique_samples) {
       n_to_sample <- query_per_sample[samp]
+      if (is.na(n_to_sample) || n_to_sample <= 0) next
 
-      if (n_to_sample > 0 && nrow(samp_coords) >= n_to_sample) {
-        pseudo_idx <- sample(nrow(samp_coords), n_to_sample)
-        samp_coords[pseudo_idx, , drop = FALSE]
+      samp_coords <- coords_all[sample_ids_all == samp, , drop = FALSE]
+      if (nrow(samp_coords) < n_to_sample) next
+
+      pseudo <- samp_coords[sample(nrow(samp_coords), n_to_sample), ,
+        drop = FALSE
+      ]
+      n_pseudo_total <- n_pseudo_total + nrow(pseudo)
+
+      # Only this sample target cells search only this sample pseudo-query
+      tgt_idx <- which(sample_ids_target == samp)
+      if (!length(tgt_idx)) next
+
+      eff_k <- min(k_neighbors, nrow(pseudo))
+      nn_s <- RANN::nn2(pseudo, coords_target[tgt_idx, , drop = FALSE],
+        k = eff_k
+      )
+      d_s <- if (eff_k == 1) {
+        as.vector(nn_s$nn.dists)
       } else {
-        matrix(nrow = 0, ncol = 2)
+        rowMeans(nn_s$nn.dists)
       }
-    })
-
-    pseudo_query_coords <- do.call(rbind, pseudo_query_coords_list)
-
-    if (nrow(pseudo_query_coords) < 5) {
-      null_coefs[i] <- NA
-      next
+      perm_distances[tgt_idx] <- pmin(d_s, MAX_DISTANCE_UM)
     }
 
-    # Calculate distances to pseudo-query cells
-    effective_k <- min(k_neighbors, nrow(pseudo_query_coords))
-    nn_result <- RANN::nn2(pseudo_query_coords, coords_target, k = effective_k)
-    if (effective_k == 1) {
-      perm_distances <- pmin(as.vector(nn_result$nn.dists), MAX_DISTANCE_UM)
-    } else {
-      perm_distances <- pmin(rowMeans(nn_result$nn.dists), MAX_DISTANCE_UM)
+    if (n_pseudo_total < 5) {
+      null_coefs[i] <- NA
+      next
     }
 
     # Calculate Poisson coefficients per sample using inverse-variance weighting
@@ -1213,7 +1231,10 @@ coord_cols <- get_coord_columns(cell_data)
 coords <- as.matrix(cell_data[, ..coord_cols])
 sample_ids_all <- cell_data[[SAMPLE_COL]]
 
-query_mask <- cell_data[[CELLTYPE_COL]] == QUERY_CELLTYPE
+# NA-safe mask: an == comparison yields NA for unannotated cells, and
+# calculate_distance_to_type_by_sample() rejects NA in the mask.
+query_mask <- !is.na(cell_data[[CELLTYPE_COL]]) &
+  cell_data[[CELLTYPE_COL]] == QUERY_CELLTYPE
 n_query <- sum(query_mask)
 message("Query cells (", QUERY_CELLTYPE, "): ", n_query)
 
@@ -1229,17 +1250,34 @@ for (samp in names(query_per_sample)) {
   message("  ", samp, ": ", query_per_sample[samp])
 }
 
-query_coords <- coords[query_mask, , drop = FALSE]
+# Distance from each cell to its nearest k query cells, PARTITIONED BY SAMPLE.
+#
+# This must not be a single pooled nn2(query_coords, coords) call. Sections
+# routinely occupy overlapping coordinate ranges, since each section
+# coordinates start near zero in its own frame, so a pooled search returns the
+# nearest query cell from ANY sample. Aggregating per sample afterwards does
+# not repair it: the per-sample GLM and the meta-analysis would already be
+# running on distances that crossed sample boundaries.
+sample_ids_all <- cell_data[[SAMPLE_COL]]
+check_coordinate_frames(coords, sample_ids_all, target_mask = query_mask)
 
-# Calculate distance from each cell to nearest k query cells
-effective_k <- min(K_NEIGHBORS, nrow(query_coords))
-message("Computing ", effective_k, "-NN distances...")
-nn_result <- nn2(query_coords, coords, k = effective_k)
+message("Computing ", K_NEIGHBORS, "-NN distances within each sample...")
+cell_data[, dist_to_query := calculate_distance_to_type_by_sample(
+  coords, sample_ids_all, query_mask, k = K_NEIGHBORS
+)]
 
-if (effective_k == 1) {
-  cell_data[, dist_to_query := as.vector(nn_result$nn.dists)]
-} else {
-  cell_data[, dist_to_query := rowMeans(nn_result$nn.dists)]
+# A sample with no query cells has no distance to measure from. The pooled
+# search this replaces could not produce NA, since it happily returned a query
+# cell from another sample, so nothing downstream expects it.
+n_no_dist <- sum(is.na(cell_data$dist_to_query))
+if (n_no_dist > 0) {
+  warning(n_no_dist, " cell(s) are in a sample with no ", QUERY_CELLTYPE,
+          " cells and are excluded from the analysis.", call. = FALSE)
+  cell_data <- cell_data[!is.na(dist_to_query)]
+  if (nrow(cell_data) == 0) {
+    stop("No cells remain after dropping samples without query cells.",
+         call. = FALSE)
+  }
 }
 
 # Cap distances at maximum

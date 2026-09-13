@@ -31,7 +31,8 @@ run_ripple(
   min_sig_fraction = 0,
   sig_alpha = 0.05,
   assay = NULL,
-  verbose = TRUE
+  verbose = TRUE,
+  permutation_pool = c("non_target", "all")
 )
 }
 \arguments{
@@ -67,8 +68,8 @@ matrices or CSVs.}
 \item{k_neighbors}{Number of nearest query cells for distance calculation
 (default: \code{1}).}
 
-\item{max_distance_um}{Maximum distance in micrometers to consider
-(default: \code{200}).}
+\item{max_distance_um}{Distance cap in micrometers (default: \code{200}).
+Farther cells remain in the model with their distance set to this value.}
 
 \item{n_permutations}{Number of label permutations for null distribution
 (default: \code{0} = skip permutation testing).}
@@ -138,6 +139,11 @@ which would silently break the Poisson GLM. Pass \code{assay} explicitly
 to override. Ignored for SCE / SPE / file-path inputs.}
 
 \item{verbose}{Print progress messages (default: \code{TRUE}).}
+
+\item{permutation_pool}{Pseudo-query candidates for optional permutation
+tests: \code{"non_target"} (default) excludes all cells of the target
+population within each sample. \code{"all"} reproduces previous full-pool
+sampling. The selected mode is recorded in permutation result tables.}
 }
 \value{
 A \code{data.table} with columns: \code{gene}, \code{cell_type},

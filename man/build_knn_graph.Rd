@@ -4,18 +4,24 @@
 \alias{build_knn_graph}
 \title{Build k-nearest neighbor graph}
 \usage{
-build_knn_graph(coords, k = 20)
+build_knn_graph(coords, k = 20, sample_ids)
 }
 \arguments{
 \item{coords}{Numeric matrix of spatial coordinates (n x 2).}
 
 \item{k}{Integer. Number of neighbors (default: 20).}
+
+\item{sample_ids}{Vector of length n giving the sample each cell belongs to.
+Required. The graph is built within each sample separately.}
 }
 \value{
 A list with two components:
 \describe{
-\item{\code{indices}}{Integer matrix (n x k) of neighbor indices.}
-\item{\code{distances}}{Numeric matrix (n x k) of distances to neighbors.}
+\item{\code{indices}}{Integer matrix (n x k) of neighbor indices, given as
+row numbers into \code{coords}. Padded with \code{NA} where a sample
+holds fewer than \code{k + 1} cells.}
+\item{\code{distances}}{Numeric matrix (n x k) of distances to neighbors,
+\code{NA} in the same positions.}
 }
 }
 \description{
@@ -24,12 +30,21 @@ RANN for fast kNN queries.
 }
 \details{
 Uses \code{RANN::nn2} for fast kNN queries. The self-neighbor
-(distance 0) is automatically excluded.
+(distance 0) is excluded.
+
+The search is partitioned by \code{sample_ids}, so a cell can only ever
+be linked to a cell from its own sample. This is not a safety measure
+bolted onto a pooled graph, it is the only meaningful definition: a
+spatial neighbour in a different tissue section does not exist
+physically, and sections routinely share a coordinate frame, so a pooled
+search returns those non-existent neighbours silently. Returned indices
+are global row numbers, so the output can be used without tracking the
+partition.
 }
 \examples{
 \dontrun{
 coords <- matrix(runif(200), ncol = 2)
-knn <- build_knn_graph(coords, k = 10)
+knn <- build_knn_graph(coords, k = 10, sample_ids = rep("s1", 100))
 }
 
 }

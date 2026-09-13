@@ -348,17 +348,51 @@ get_coord_columns <- function(meta) {
 #' @param coords Matrix of spatial coordinates (n x 2)
 #' @param k Number of neighbors
 #' @return List with indices and distances matrices (n x k)
-build_knn_graph <- function(coords, k = 20) {
-  message(sprintf("Building %d-nearest neighbor graph for %d cells...", k, nrow(coords)))
+build_knn_graph <- function(coords, k = 20, sample_ids) {
+  if (missing(sample_ids)) {
+    stop("sample_ids is required. Spatial neighbours are only meaningful ",
+         "within one tissue section: sections routinely share a coordinate ",
+         "frame, so a search pooled across samples silently returns ",
+         "neighbours from a different section. For genuinely single-sample ",
+         "data pass rep(\"s1\", nrow(coords)).", call. = FALSE)
+  }
+  if (length(sample_ids) != nrow(coords)) {
+    stop("sample_ids must have one entry per row of coords (got ",
+         length(sample_ids), " for ", nrow(coords), " rows).", call. = FALSE)
+  }
 
-  # RANN::nn2 is very fast for kNN queries
-  nn_result <- nn2(coords, coords, k = k + 1)  # +1 because cell is its own neighbor
+  # Partitioned by sample. A spatial neighbour in a different tissue section
+  # does not exist physically, and sections routinely share a coordinate
+  # frame, so a pooled search returns those non-existent neighbours silently.
+  # Returned indices are global row numbers into coords.
+  n <- nrow(coords)
+  samples <- unique(sample_ids[!is.na(sample_ids)])
+  message(sprintf(
+    "Building %d-nearest neighbor graph for %d cells in %d sample(s)...",
+    k, n, length(samples)))
 
-  # Remove self (first column)
-  list(
-    indices = nn_result$nn.idx[, -1, drop = FALSE],
-    distances = nn_result$nn.dists[, -1, drop = FALSE]
-  )
+  indices <- matrix(NA_integer_, nrow = n, ncol = k)
+  distances <- matrix(NA_real_, nrow = n, ncol = k)
+  short <- character(0)
+
+  for (s in samples) {
+    rows <- which(!is.na(sample_ids) & sample_ids == s)
+    if (length(rows) < 2) { short <- c(short, as.character(s)); next }
+    kk <- min(k, length(rows) - 1L)
+    if (kk < k) short <- c(short, as.character(s))
+    nn <- nn2(coords[rows, , drop = FALSE], coords[rows, , drop = FALSE],
+              k = kk + 1L)
+    local_idx <- nn$nn.idx[, -1, drop = FALSE]
+    indices[rows, seq_len(kk)] <- matrix(rows[local_idx], nrow = length(rows))
+    distances[rows, seq_len(kk)] <- nn$nn.dists[, -1, drop = FALSE]
+  }
+
+  if (length(short)) {
+    warning("Fewer than k + 1 cells in sample(s): ",
+            paste(unique(short), collapse = ", "),
+            ". Those rows are padded with NA.", call. = FALSE)
+  }
+  list(indices = indices, distances = distances)
 }
 
 
@@ -367,25 +401,46 @@ build_knn_graph <- function(coords, k = 20) {
 #' @param coords Matrix of spatial coordinates
 #' @param radius Search radius in coordinate units (microns)
 #' @return List of neighbor indices for each cell
-build_radius_graph <- function(coords, radius) {
-  message(sprintf("Building radius neighbor graph (r=%s)...", radius))
-
-  n <- nrow(coords)
-  neighbors <- vector("list", n)
-
-  # Use RANN for initial broad search, then filter by radius
-  # Estimate k based on typical density
-  avg_density <- n / (diff(range(coords[,1])) * diff(range(coords[,2])))
-  k_est <- min(ceiling(avg_density * pi * radius^2 * 2), n - 1)
-
-  nn_result <- nn2(coords, coords, k = k_est + 1)
-
-  for (i in seq_len(n)) {
-    within_radius <- nn_result$nn.dists[i, ] <= radius & nn_result$nn.dists[i, ] > 0
-    neighbors[[i]] <- nn_result$nn.idx[i, within_radius]
+build_radius_graph <- function(coords, radius, sample_ids) {
+  if (missing(sample_ids)) {
+    stop("sample_ids is required. Spatial neighbours are only meaningful ",
+         "within one tissue section: sections routinely share a coordinate ",
+         "frame, so a search pooled across samples silently returns ",
+         "neighbours from a different section. For genuinely single-sample ",
+         "data pass rep(\"s1\", nrow(coords)).", call. = FALSE)
+  }
+  if (length(sample_ids) != nrow(coords)) {
+    stop("sample_ids must have one entry per row of coords (got ",
+         length(sample_ids), " for ", nrow(coords), " rows).", call. = FALSE)
   }
 
-  return(neighbors)
+  # Partitioned by sample, and the density estimate is taken WITHIN each
+  # sample: a density computed over stacked sections is not the density of any
+  # real tissue.
+  n <- nrow(coords)
+  samples <- unique(sample_ids[!is.na(sample_ids)])
+  message(sprintf("Building radius neighbor graph (r=%s) in %d sample(s)...",
+                  radius, length(samples)))
+
+  neighbors <- rep(list(integer(0)), n)
+  for (s in samples) {
+    rows <- which(!is.na(sample_ids) & sample_ids == s)
+    if (length(rows) < 2) next
+    sc <- coords[rows, , drop = FALSE]
+    span <- diff(range(sc[, 1])) * diff(range(sc[, 2]))
+    k_est <- if (is.finite(span) && span > 0) {
+      min(ceiling((length(rows) / span) * pi * radius^2 * 2), length(rows) - 1L)
+    } else {
+      length(rows) - 1L
+    }
+    k_est <- max(as.integer(k_est), 1L)
+    nn <- nn2(sc, sc, k = k_est + 1L)
+    for (j2 in seq_along(rows)) {
+      within <- nn$nn.dists[j2, ] <= radius & nn$nn.dists[j2, ] > 0
+      neighbors[[rows[j2]]] <- rows[nn$nn.idx[j2, within]]
+    }
+  }
+  neighbors
 }
 
 
@@ -445,25 +500,180 @@ calculate_neighbor_composition <- function(cell_types, query_cell_type, knn_resu
 # Distance Calculations
 # =============================================================================
 
+#' Report whether per-sample coordinate frames overlap
+#'
+#' Mirrors check_coordinate_frames() in R/spatial.R. Compares the sum of
+#' per-sample bounding-box areas with the global bounding-box area. Sections
+#' laid out in disjoint space sum to at most the global area, so a ratio above
+#' 1 means at least two sections occupy the same coordinate region, which is
+#' the condition under which a pooled nearest-neighbour search silently
+#' returns cross-sample neighbours.
+#'
+#' @param coords Matrix of spatial coordinates (n x 2)
+#' @param sample_ids Vector of length n giving each cell sample
+#' @param warn Logical. Emit a warning when overlap is detected.
+#' @return Invisibly, a list with ratio, n_overlapping_pairs, n_pairs, overlaps
+check_coordinate_frames <- function(coords, sample_ids, target_mask = NULL,
+                                    warn = TRUE, severe_fraction = 0.05,
+                                    max_cells = 10000L) {
+  ok <- !is.na(sample_ids) & !is.na(coords[, 1]) & !is.na(coords[, 2])
+  if (!all(ok)) {
+    coords <- coords[ok, , drop = FALSE]
+    sample_ids <- sample_ids[ok]
+    if (!is.null(target_mask)) target_mask <- target_mask[ok]
+  }
+  samples <- unique(sample_ids)
+  if (length(samples) < 2) {
+    return(invisible(list(ratio = NA_real_, n_overlapping_pairs = 0L,
+                          n_pairs = 0L, overlaps = FALSE,
+                          cross_sample_fraction = NA_real_,
+                          n_cells_checked = 0L, severe = FALSE)))
+  }
+
+  box <- do.call(rbind, lapply(samples, function(s) {
+    i <- sample_ids == s
+    c(xmin = min(coords[i, 1]), xmax = max(coords[i, 1]),
+      ymin = min(coords[i, 2]), ymax = max(coords[i, 2]))
+  }))
+  areas <- (box[, "xmax"] - box[, "xmin"]) * (box[, "ymax"] - box[, "ymin"])
+  global <- (max(coords[, 1]) - min(coords[, 1])) *
+    (max(coords[, 2]) - min(coords[, 2]))
+  ratio <- if (global > 0) sum(areas) / global else NA_real_
+
+  n_ov <- 0L
+  n_pairs <- 0L
+  for (i in seq_len(nrow(box) - 1)) {
+    for (j in seq(i + 1, nrow(box))) {
+      n_pairs <- n_pairs + 1L
+      ox <- min(box[i, "xmax"], box[j, "xmax"]) -
+        max(box[i, "xmin"], box[j, "xmin"])
+      oy <- min(box[i, "ymax"], box[j, "ymax"]) -
+        max(box[i, "ymin"], box[j, "ymin"])
+      if (isTRUE(ox > 0) && isTRUE(oy > 0)) n_ov <- n_ov + 1L
+    }
+  }
+
+  # Severity: how often would a pooled search actually cross a sample
+  # boundary? Deterministically thinned subsample, so it never consumes random
+  # numbers and cannot shift a seeded permutation downstream.
+  #
+  # Note the area ratio is a ONE-SIDED test. Above 1 it proves overlap by
+  # pigeonhole; below 1 it proves nothing, because sections tiled with gaps can
+  # hide a perfectly superimposed pair at a ratio near 0.02. The pairwise box
+  # intersection is the direct measurement, and this fraction is the severity.
+  cross <- NA_real_
+  n_checked <- 0L
+  if (!is.null(target_mask) && n_ov > 0) {
+    tgt <- which(!is.na(target_mask) & target_mask)
+    if (length(tgt) > 0) {
+      n <- nrow(coords)
+      idx <- if (n > max_cells) {
+        unique(as.integer(seq.int(1L, n, length.out = max_cells)))
+      } else {
+        seq_len(n)
+      }
+      nn <- nn2(coords[tgt, , drop = FALSE], coords[idx, , drop = FALSE], k = 1)
+      owner <- sample_ids[tgt][as.vector(nn$nn.idx)]
+      cross <- mean(owner != sample_ids[idx])
+      n_checked <- length(idx)
+    }
+  }
+  severe <- n_ov > 0 && (is.na(cross) || cross > severe_fraction)
+
+  res <- list(ratio = ratio, n_overlapping_pairs = n_ov, n_pairs = n_pairs,
+              overlaps = n_ov > 0, cross_sample_fraction = cross,
+              n_cells_checked = n_checked, severe = severe)
+  # ANY bounding-box intersection warns; the measured fraction sizes the
+  # problem but does not gate whether the user is told.
+  if (warn && n_ov > 0) {
+    warning(n_ov, " of ", n_pairs, " sample pairs have overlapping coordinate ",
+            "bounding boxes, so the sections share a coordinate frame",
+            if (is.na(cross)) "" else
+              paste0(" and ", round(100 * cross, 1), "% of cells have their ",
+                     "nearest target cell in a DIFFERENT sample"),
+            ". Any POOLED nearest-neighbour search on these coordinates ",
+            "returns cross-sample neighbours. Use ",
+            "calculate_distance_to_type_by_sample().", call. = FALSE)
+  }
+  invisible(res)
+}
+
+
+#' Distance to the nearest cell of a target type, computed within each sample
+#'
+#' Mirrors calculate_distance_to_type_by_sample() in R/spatial.R. Tissue
+#' sections routinely occupy overlapping coordinate ranges, since each section
+#' coordinates start near zero in its own frame. A nearest-neighbour search run
+#' over cells from more than one sample then silently returns neighbours from a
+#' different sample, and no amount of downstream per-sample aggregation repairs
+#' it, because the damage happens before aggregation. This partitions the
+#' search by sample, so a cell can only ever match a target cell from its own
+#' sample.
+#'
+#' @param coords Matrix of spatial coordinates (n x 2)
+#' @param sample_ids Vector of length n giving each cell sample
+#' @param target_mask Logical vector of length n, TRUE for valid search targets
+#' @param k Number of nearest targets to average over
+#' @return Numeric vector of length n in the original row order. Cells in a
+#'   sample with no target cells receive NA.
+calculate_distance_to_type_by_sample <- function(coords, sample_ids,
+                                                 target_mask, k = 1) {
+  n <- nrow(coords)
+  if (length(sample_ids) != n || length(target_mask) != n) {
+    stop("sample_ids and target_mask must each have one entry per row of ",
+         "coords (got ", length(sample_ids), ", ", length(target_mask),
+         " for ", n, " rows).", call. = FALSE)
+  }
+  if (anyNA(target_mask)) {
+    stop("target_mask contains NA; mask the cell-type comparison NA-safely ",
+         "before calling.", call. = FALSE)
+  }
+
+  out <- rep(NA_real_, n)
+  empty <- character(0)
+  for (s in unique(sample_ids)) {
+    rows <- which(sample_ids == s)
+    tgt <- rows[target_mask[rows]]
+    if (!length(tgt)) {
+      empty <- c(empty, as.character(s))
+      next
+    }
+    kk <- min(k, length(tgt))
+    nn <- nn2(coords[tgt, , drop = FALSE], coords[rows, , drop = FALSE], k = kk)
+    out[rows] <- if (kk == 1) as.vector(nn$nn.dists) else rowMeans(nn$nn.dists)
+  }
+  if (length(empty)) {
+    warning("No target cells in sample(s): ", paste(empty, collapse = ", "),
+            ". Those cells receive NA distances.", call. = FALSE)
+  }
+  out
+}
+
+
 #' Calculate distance from each cell to nearest cell of target type
 #'
 #' @param coords Matrix of spatial coordinates
 #' @param cell_types Vector of cell type labels
 #' @param target_type Cell type to measure distance to
+#' @param sample_ids Vector of length n giving each cell sample. Required; the
+#'   search is partitioned by it, so a cell can only ever match a target cell
+#'   from its own sample. For single-sample data pass rep("s1", nrow(coords)).
 #' @return Named vector of distances
-calculate_distance_to_type <- function(coords, cell_types, target_type) {
-  target_mask <- cell_types == target_type
-  target_coords <- coords[target_mask, , drop = FALSE]
+calculate_distance_to_type <- function(coords, cell_types, target_type,
+                                       sample_ids) {
+  # NA-safe: cell_types == target_type yields NA (not FALSE) for unannotated
+  # cells, which would inject NA-coordinate rows into the RANN reference set.
+  target_mask <- !is.na(cell_types) & cell_types == target_type
 
-  if (nrow(target_coords) == 0) {
+  if (!any(target_mask)) {
     warning(sprintf("No cells of type '%s' found", target_type))
     return(rep(NA_real_, nrow(coords)))
   }
 
-  # Find nearest target cell for each cell
-  nn_result <- nn2(target_coords, coords, k = 1)
-
-  return(nn_result$nn.dists[, 1])
+  calculate_distance_to_type_by_sample(
+    coords = coords, sample_ids = sample_ids,
+    target_mask = target_mask, k = 1
+  )
 }
 
 

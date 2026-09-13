@@ -1,304 +1,247 @@
 ---
-title: "RIPPLE benchmarks: FDR calibration, power, and runtime"
+title: "RIPPLE benchmarks: null false positive rate, power, and runtime"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{RIPPLE benchmarks: FDR calibration, power, and runtime}
+  %\VignetteIndexEntry{RIPPLE benchmarks: null false positive rate, power, and runtime}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
 ```{r setup, include = FALSE}
-knitr::opts_chunk$set(
-  collapse = TRUE,
-  comment = "#>",
-  fig.width = 7,
-  fig.height = 5,
-  out.width = "100%"
-)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>",
+  fig.width = 7, fig.height = 5, out.width = "100%")
 library(ripple)
 library(data.table)
 library(ggplot2)
-library(patchwork)
+benchmarks <- readRDS(system.file("extdata/benchmarks_current_results.rds",
+                                package = "ripple", mustWork = TRUE))
+pct <- function(x, digits = 1) paste0(formatC(100 * x, format = "f", digits = digits), "%")
+summarize_null <- function(x, groups = "n_samples") {
+  as.data.table(x)[, .(runs = .N, false_calls = sum(n_sig_fdr),
+    tests = sum(n_genes_tested), pooled_fpr = sum(n_sig_fdr) / sum(n_genes_tested),
+    empirical_fdr = mean(n_sig_fdr > 0)), by = groups]
+}
 ```
 
-This vignette presents the synthetic benchmarks that validate RIPPLE's
-statistical properties and runtime profile:
-
-1. **FDR calibration under the null.** Empirical type-I error control
-   with the strict gate (sign consistency = 1.0). Shows the method is
-   well calibrated: false positives stay at or below the nominal rate.
-2. **Relaxed-gate calibration cost.** Same setup with sign consistency
-   ≥ 0.75 (the recommended setting for N ≥ 5). Shows how much
-   calibration is given up when the gate is relaxed.
-3. **Power curves.** Sensitivity as a function of effect size, sample
-   count, and gate strictness. Shows the smallest gradient the method
-   can detect at each sample size.
-4. **Runtime and memory.** Wall time and peak RAM across three dataset
-   sizes. Shows how the method scales.
-
-All four panels appear in **paper Figure S1**, rendered by
-`paper/render_figures.R`. This vignette uses the same cached RDS
-results from `inst/extdata/`.
-
-This vignette covers synthetic benchmarks only, so contamination
-flagging does not arise here. RIPPLE never decides what counts as
-contamination on its own: it proposes candidates (the cross-cell-type
-`classify_gene_specificity` "broad" flag, ambient-family helpers, and
-any `query_signature_genes` you supply), and you curate the final list
-using domain knowledge. See the getting-started and enrichment
-vignettes for how that works on real data.
-
-Confounder control, permutation testing, fGSEA enrichment, and
-ligand-receptor integration are all optional downstream steps, not
-required to run the core gradient test. The other vignettes cover each
-of them.
+This vignette presents RIPPLE's synthetic benchmarks for null false calls,
+gradient recovery, and runtime. The five main sections correspond to Figure
+S1A–E: Poisson null, overdispersed null, sign-gate ablation, power at matched
+expression, and runtime. Tables and plots use the latest version.
+Optional confounder models, query-location permutations, and pathway or ligand-receptor
+analyses are not evaluated here.
 
 ## Synthetic data design
 
-Each dataset is a small `SpatialExperiment` with three cell types:
+Statistical benchmarks use a 500 µm field with 30 Tumor cells in a central
+disc of radius 60 µm, 120 target T cells distributed across the field, and
+50 Fibroblasts in a ring at 100–200 µm from the center. Null datasets have no
+planted distance dependence. The power benchmark plants negative slopes in
+five T-cell genes, giving higher expression near Tumor cells.
 
-- **Tumor** (30 cells): dense central cluster, radius 60 µm.
-- **T cells** (120 cells): uniformly distributed; the target.
-- **Fibroblasts** (50 cells): annular ring at 100 to 200 µm from tumor.
+Two error measures are reported separately:
 
-For **null** datasets, all genes follow a flat Poisson rate with no
-distance dependence. For **gradient** datasets, a subset of T-cell
-genes have expression rates modulated by `exp(beta * distance_to_tumor)`,
-where `beta` controls magnitude and direction.
+- **Pooled per-gene FPR:** total false discoveries divided by total tested
+  null genes across simulations.
+- **Empirical FDR under the complete null:** the fraction of simulations with
+  any discovery. When all genes are null, every discovery is false, so this
+  also equals the empirical family-wise error rate.
 
-## 1. FDR calibration under the null (strict gate)
+Calls use `fisher_fdr < 0.05`. A low pooled per-gene FPR does not by itself
+establish 5% FDR control.
 
-500 background genes per dataset, 50 iterations per sample size
-(N = 3, 5, 10), no planted gradient. The strict sign-consistency gate
-(sign = 1.0) requires unanimous direction across replicates.
+## 1. Poisson null (S1A)
 
-```{r fdr-strict, fig.cap = "Empirical FDR under a true null. Dashed line: nominal 0.05 level."}
-null_path <- system.file("extdata/bench_null_hires_results.rds",
-                         package = "ripple")
-null_res <- readRDS(null_path)$per_run
+Each dataset contains 500 background genes, with 50 simulations at each of
+N = 3, 5, and 10 biological replicates: 25,000 null-gene tests per sample
+size, or 75,000 overall. The default sign gate requires agreement across all
+valid replicates.
 
-p1 <- ggplot(null_res, aes(x = factor(n_samples), y = empirical_fdr)) +
-  geom_boxplot(fill = "#E8E8E8", outlier.size = 1) +
-  geom_jitter(width = 0.15, alpha = 0.3, size = 1) +
-  geom_hline(yintercept = 0.05, linetype = "dashed", color = "#D55E00") +
-  labs(
-    x = "Number of biological replicates (N)",
-    y = "Empirical FDR (Fisher FDR < 0.05)",
-    title = "FDR calibration under the null (strict gate, sign = 1.0)"
-  ) +
+```{r poisson-null, fig.cap = "Pooled per-gene FPR after the strict sign gate and BH adjustment. Zero means no false calls were observed in these simulations."}
+null <- summarize_null(benchmarks$null_strict)
+ggplot(null, aes(factor(n_samples), pooled_fpr)) +
+  geom_point(size = 3, colour = "#377EB8") +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 0.001),
+                     limits = c(0, NA)) +
+  labs(x = "Biological replicates (N)", y = "Pooled per-gene FPR") +
   theme_ripple(base_size = 12)
-print(p1)
-
-# Pooled-rate summary
-summary_dt <- null_res[, .(
-  iterations  = .N,
-  mean_fdr    = sprintf("%.4f", mean(empirical_fdr)),
-  max_fdr     = sprintf("%.4f", max(empirical_fdr)),
-  pooled_rate = sprintf("%.4e", sum(n_sig_fdr) / sum(n_genes_tested))
-), by = n_samples]
-knitr::kable(
-  summary_dt,
-  col.names = c("N", "Iterations", "Mean FDR", "Max FDR",
-                "Pooled FDR (genes)"),
-  caption = "Null FDR calibration with strict gate."
-)
+knitr::kable(null[, .(N = n_samples, Runs = runs, Tests = tests,
+  `False calls` = false_calls, `Pooled FPR` = pct(pooled_fpr, 3),
+  `Empirical FDR` = pct(empirical_fdr))])
 ```
 
-The empirical FDR is near zero across all sample sizes (mean FDR
-8e-5 at N = 3, 4e-5 at N = 5, 0 at N = 10). The strict gate adds a
-multiplicative safety factor on top of Fisher's already-calibrated
-p-value combination. Under the null, the probability that all N
-per-sample coefficients agree on sign is `2 * 0.5^N`, so the gate
-scales the false-positive rate by this factor before FDR correction
-is even applied. Paper Figure S1B overlays this theoretical floor on
-the empirical points.
+The corrected runs produced one false call at N = 3 and none at N = 5 or
+10, giving pooled FPRs of 0.004%, 0%, and 0%. These data follow the Poisson
+model used for fitting.
 
-## 2. Relaxed-gate calibration cost
+### Relaxing the sign gate
 
-The strict gate is conservative. Relaxing to sign consistency ≥ 0.75
-(allowing 1 dissenting replicate at N = 5, 2 at N = 10) recovers power
-at the cost of a higher false-positive floor. The relaxed-gate
-benchmark validates that the cost is bounded.
+The same Poisson-null datasets were also evaluated at `sign_consistency = 0.75`.
+The post-BH false-call counts were unchanged in these runs.
+The default remains 1.0; relaxation is suggested only for designs with at
+least six replicates and should be reported explicitly. N = 5 is included
+below as a benchmark comparison. At N = 3, both thresholds require
+unanimous signs.
 
-```{r fdr-relaxed}
-null_relaxed <- readRDS(system.file(
-  "extdata/bench_null_hires_relaxed_results.rds",
-  package = "ripple"
-))$per_run
-
-summary_relaxed <- null_relaxed[, .(
-  iterations  = .N,
-  mean_fdr    = sprintf("%.4f", mean(empirical_fdr)),
-  max_fdr     = sprintf("%.4f", max(empirical_fdr)),
-  pooled_rate = sprintf("%.4e", sum(n_sig_fdr) / sum(n_genes_tested))
-), by = n_samples]
-knitr::kable(
-  summary_relaxed,
-  col.names = c("N", "Iterations", "Mean FDR", "Max FDR",
-                "Pooled FDR (genes)"),
-  caption = "Null FDR calibration with relaxed gate (sign >= 0.75)."
-)
+```{r relaxed-null}
+relaxed <- summarize_null(benchmarks$null_relaxed)
+knitr::kable(relaxed[, .(N = n_samples, `False calls` = false_calls,
+  `Pooled FPR` = pct(pooled_fpr, 3), `Empirical FDR` = pct(empirical_fdr))],
+  caption = "Poisson-null results with sign consistency 0.75.")
 ```
 
-The pooled raw-p rate rises under the relaxed gate (for example at
-N = 10 it goes from 8e-5 strict to 5e-3 relaxed; see paper Figure S1),
-but the **FDR rate stays close to strict** (mean FDR is still 0 at
-N = 10). BH correction absorbs most of the gate change. Relaxing the
-gate is cheap on FDR but loosens raw p-value interpretation, so
-downstream analysis should always use `fisher_fdr`, not raw p-values.
+## 2. Overdispersed null (S1B)
 
-## 3. Power curves (strict vs relaxed gate)
+This benchmark uses 50 background genes and 50 simulations for each sample
+size and variance-to-mean ratio (1, 1.5, 2, and 3), giving 600 datasets.
+Counts are negative binomial above ratio 1, while the fitted model remains
+Poisson. The plot shows pooled per-gene FPR, as in S1B.
 
-5 gradient genes (negative coefficient, induced near tumor) and 495
-background genes per dataset. Four effect sizes (`|beta|` = 0.002, 0.005,
-0.01, 0.02) × three sample sizes (N = 3, 5, 10) × 30 iterations each.
-
-```{r power-curves, fig.width = 8, fig.height = 5}
-power_strict  <- readRDS(system.file(
-  "extdata/bench_power_results.rds", package = "ripple"
-))$summary
-power_relaxed <- readRDS(system.file(
-  "extdata/bench_power_relaxed_results.rds", package = "ripple"
-))$summary
-
-power_combined <- rbindlist(list(
-  cbind(power_strict,  gate = "Strict (sign = 1.0)"),
-  cbind(power_relaxed, gate = "Relaxed (sign >= 0.75)")
-), use.names = TRUE)
-power_combined[, gate := factor(gate,
-  levels = c("Strict (sign = 1.0)", "Relaxed (sign >= 0.75)"))]
-
-ggplot(
-  power_combined,
-  aes(
-    x = abs(beta), y = mean_power,
-    colour = factor(n_samples), linetype = gate,
-    group = interaction(n_samples, gate)
-  )
-) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 2.5) +
-  scale_x_log10(labels = scales::label_number()) +
+```{r overdispersed-null, fig.cap = "Pooled per-gene FPR under increasing count overdispersion, using the unchanged Poisson model and strict sign gate."}
+nb <- summarize_null(benchmarks$null_nb, c("dispersion", "n_samples"))
+ggplot(nb, aes(dispersion, pooled_fpr, colour = factor(n_samples))) +
+  geom_line() + geom_point(size = 2.5) +
+  scale_x_continuous(breaks = c(1, 1.5, 2, 3)) +
+  scale_y_continuous(labels = scales::label_percent(), limits = c(0, NA)) +
   scale_colour_brewer(palette = "Set1", name = "N") +
-  scale_linetype_manual(values = c(
-    "Strict (sign = 1.0)"    = "solid",
-    "Relaxed (sign >= 0.75)" = "dashed"
-  ), name = "Gate") +
-  labs(
-    x = expression("|gradient score " * beta * "| (per " * mu * "m)"),
-    y = "Power (sensitivity)",
-    title = "Power to detect planted gradient genes"
-  ) +
+  labs(x = "Simulated variance-to-mean ratio", y = "Pooled per-gene FPR") +
+  theme_ripple(base_size = 12)
+knitr::kable(nb[order(dispersion, n_samples), .(
+  `Variance / mean` = dispersion, N = n_samples,
+  `Pooled FPR` = pct(pooled_fpr, 2), `Empirical FDR` = pct(empirical_fdr))])
+```
+
+At ratio 3, pooled FPRs were 4.8%, 1.2%, and 0.24% for N = 3, 5, and 10.
+However, empirical FDR was 80%, 44%, and 10%, respectively. The low per-gene
+rates therefore do not demonstrate 5% FDR control under overdispersion.
+
+## 3. Sign-gate ablation (S1C)
+
+This separate simulation exemplifies the combination step. It uses
+200,000 sets of five independent uniform p-values and independent random
+signs, without simulating cells or fitting GLMs. Under these assumptions,
+the probability of unanimous signs is `2 * 0.5^N`, or 1/16 at N = 5.
+This factor applies to rejection at a fixed unadjusted Fisher threshold;
+it is not a general guarantee for fitted tissue data or post-BH FDR.
+
+```{r sign-ablation, fig.cap = "Idealized Fisher rejection rates with and without the strict sign gate. No BH adjustment is applied in this ablation."}
+set.seed(2026)
+n_sets <- 200000L
+n_reps <- 5L
+p <- matrix(runif(n_sets * n_reps), nrow = n_sets)
+s <- matrix(sample(c(-1L, 1L), n_sets * n_reps, replace = TRUE), nrow = n_sets)
+fisher <- pchisq(-2 * rowSums(log(pmax(p, 1e-15))),
+                 df = 2 * n_reps, lower.tail = FALSE)
+pass <- abs(rowSums(s)) == n_reps
+ablation <- rbindlist(lapply(10^seq(-4, log10(0.5), length.out = 25), function(a) {
+  data.table(alpha = a, rate = c(mean(fisher < a), mean(fisher < a & pass)),
+             gate = c("Without sign gate", "With sign gate"))
+}))
+ggplot(ablation, aes(alpha, rate, colour = gate)) +
+  geom_line() + geom_point(size = 1.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", colour = "grey50") +
+  labs(x = "Unadjusted Fisher threshold", y = "Rejection rate", colour = NULL) +
+  theme_ripple(base_size = 12) + theme(legend.position = "bottom")
+```
+
+## 4. Power at matched expression (S1D)
+
+This shows expected expression at three counts per planted gene per
+target cell in every sample. Tissue layouts are shared across slopes, and
+the first three and five samples are subsets of the ten-sample dataset.
+For capped distance `d* = min(d, 200)`, the expected count is
+`3 * exp(beta * d*) / mean(exp(beta * d*))`, with the mean taken over
+that sample's 120 target cells.
+
+Each cell has 500 counts sampled from a multinomial distribution. There are
+five planted genes, 45 constant-background genes, and one balancing feature
+that carries the remaining counts. This keeps the observed-total offset
+equal to the true exposure.
+Six slopes (|β| = 0.0005, 0.001, 0.002, 0.005, 0.01, and 0.02 per µm),
+three sample sizes, and 30 simulations per combination give 540 datasets.
+Both sign gates use identical per-sample fits. Recovery counts all five
+planted genes, including any removed by the expression filter. All planted
+genes passed the unchanged filter, without priority-gene rescue.
+
+```{r matched-power, fig.width = 5.5, fig.height = 5.5, fig.cap = "Recovery at matched expected expression and sampling. The displayed range matches S1D; the complete simulated range is tabulated below."}
+power <- as.data.table(benchmarks$power_matched)[,
+  .(recovery = mean(tp / 5)), by = .(beta, n_samples, gate)]
+power[, gate_label := factor(gate, levels = c(1, 0.75),
+                            labels = c("Strict (1.0)", "Relaxed (0.75)"))]
+ggplot(power[abs(beta) >= 0.002 & abs(beta) <= 0.01],
+       aes(abs(beta), recovery, colour = factor(n_samples),
+           linetype = gate_label, group = interaction(n_samples, gate_label))) +
+  geom_line(linewidth = 0.8) + geom_point(size = 2.5) +
+  scale_x_log10(breaks = c(0.002, 0.005, 0.01), labels = c("0.002", "0.005", "0.010")) +
+  scale_y_continuous(labels = scales::label_percent(), limits = c(0.6, 1),
+                     breaks = seq(0.6, 1, 0.1)) +
+  scale_colour_brewer(palette = "Set1", name = "Replicates") +
+  scale_linetype_manual(values = c("solid", "dashed"), name = "Sign gate") +
+  labs(x = expression("Absolute planted gradient score (per " * mu * "m)"),
+       y = "Planted gradients recovered") +
   theme_ripple(base_size = 12) +
-  theme(legend.position = "right", legend.box = "vertical")
+  theme(legend.position = "bottom", legend.box = "vertical")
+power_table <- dcast(power, beta + n_samples ~ gate_label, value.var = "recovery")
+knitr::kable(power_table[order(abs(beta), n_samples), .(
+  `|beta| per µm` = abs(beta), N = n_samples,
+  Strict = pct(`Strict (1.0)`), Relaxed = pct(`Relaxed (0.75)`))])
 ```
 
-Headline numbers (matching paper Figure S1C):
+## 5. Runtime and memory (S1E)
 
-- At `|beta| >= 0.005` (a typical biological gradient), power is ~100 %
-  for N >= 5 under both gates.
-- At `|beta| = 0.002` (the smallest tested), the relaxed gate gains
-  +5 percentage points at N = 5 and +14 pp at N = 10 vs strict.
-- At N = 3 the gates coincide exactly (sign >= 0.75 of 3 ≡ sign = 1.0
-  in this implementation).
+Runtime measures `run_ripple()` separately from data generation, with three
+timing runs per dataset size. Runs were performed sequentially on a laptop
+Windows machine with an Intel Core Ultra 7 165H processor (16 cores,
+22 logical processors), using R 4.5.1. `OMP_NUM_THREADS`,
+`OPENBLAS_NUM_THREADS`, and `MKL_NUM_THREADS` were each set to one.
 
-```{r power-table}
-knitr::kable(
-  power_strict[, .(
-    beta = sprintf("%.3f", beta), N = n_samples,
-    power = sprintf("%.2f", mean_power),
-    sd    = sprintf("%.2f", sd_power),
-    fdr   = sprintf("%.3f", mean_fdr)
-  )],
-  col.names = c("|beta|", "N", "Power", "SD", "Observed FDR"),
-  caption = "Power and observed FDR by effect size and sample count (strict gate)."
-)
-```
-
-## 4. Runtime and memory
-
-End-to-end `run_ripple()` wall time and peak resident memory across
-three synthetic dataset sizes.
+Memory is the sum of the maximum-used R heap values reported by `gc()`;
+it is not operating-system peak resident memory.
 
 ```{r runtime, fig.width = 7, fig.height = 4}
-rt <- readRDS(system.file("extdata/bench_runtime_results.rds",
-                          package = "ripple"))$per_run
-
-rt_summary <- rt[, .(
-  median_t  = median(t_ripple),
-  median_mb = median(peak_mb)
-), by = .(size, n_cells, n_genes, n_samples)]
-rt_summary[, size := factor(size, levels = c("small", "medium", "large"))]
-setorder(rt_summary, size)
-
-knitr::kable(
-  rt_summary[, .(
-    size, cells = n_cells, genes = n_genes, N = n_samples,
-    `time (s)`     = sprintf("%.1f", median_t),
-    `peak RAM (MB)` = sprintf("%.0f", median_mb)
-  )],
-  caption = "Median runtime and peak RAM per dataset size (3 reps each)."
-)
-
-rt_long <- melt(
-  rt_summary, id.vars = "size",
-  measure.vars = c("median_t", "median_mb"),
-  variable.name = "metric", value.name = "value"
-)
-rt_long[, metric := fifelse(metric == "median_t",
-                            "Time (s)", "Peak RAM (MB)")]
-
-ggplot(rt_long, aes(x = size, y = value, fill = metric)) +
-  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
-  geom_text(aes(label = round(value)),
-            position = position_dodge(width = 0.75),
-            vjust = -0.3, size = 3.5) +
-  scale_fill_manual(values = c(
-    "Time (s)"      = "#6A3D9A",
-    "Peak RAM (MB)" = "#FF7F00"
-  ), name = NULL) +
-  scale_y_log10() +
-  labs(
-    x = "Dataset size", y = "value (log scale)",
-    title = "RIPPLE runtime and peak memory"
-  ) +
-  theme_ripple(base_size = 12) +
-  theme(legend.position = "bottom")
+rt <- as.data.table(benchmarks$runtime)[, .(
+  seconds = median(t_ripple), heap_mb = median(peak_mb)),
+  by = .(size, n_cells, n_genes, n_samples)]
+setorder(rt, n_cells)
+knitr::kable(rt[, .(Cells = n_cells, Genes = n_genes, N = n_samples,
+  `Median time (s)` = round(seconds, 1), `Median peak R heap (MB)` = round(heap_mb))])
+rt[, size := factor(size, levels = c("small", "medium", "large"))]
+rt_long <- melt(rt, id.vars = "size", measure.vars = c("seconds", "heap_mb"))
+rt_long[, metric := factor(variable, levels = c("seconds", "heap_mb"),
+                          labels = c("Runtime (s)", "Peak R heap (MB)"))]
+ggplot(rt_long, aes(size, value)) +
+  geom_col(fill = "#377EB8", width = 0.65) +
+  facet_wrap(~metric, scales = "free_y") +
+  labs(x = "Dataset size", y = NULL) + theme_ripple(base_size = 12)
 ```
 
-## Reproducing paper Figure S1
+## Reproducing the results
 
-The exact 4-panel figure used in the paper (with Wilson CIs, theoretical
-floors, and zero-observation triangles) is rendered by:
+The vignette renders from the bundled `benchmarks_current_results.rds`, so
+building it does not rerun the tissue simulations. The sign-gate ablation
+is generated directly in its seeded code chunk.
 
-```{r render-figS1, eval = FALSE}
-source("paper/render_figures.R")
-# renders the statistical-validation figure (paper Figure S1) to paper/figures/
+The scripts below reproduce the simulation
+designs. You can run each in a fresh R process from the repository root. They write
+to `data-raw/benchmarks/results/`. Runtime measurements depend on the machine and
+thread settings.
+
+```{bash rerun, eval = FALSE}
+Rscript data-raw/benchmarks/bench_null_hires.R
+Rscript data-raw/benchmarks/bench_null_hires_relaxed.R
+Rscript data-raw/benchmarks/bench_null_nb.R
+Rscript data-raw/benchmarks/bench_power_matched.R 3
+Rscript data-raw/benchmarks/bench_power_matched.R 5
+Rscript data-raw/benchmarks/bench_power_matched.R 10
+Rscript data-raw/benchmarks/bench_runtime.R
 ```
 
-## Re-running the benchmarks from scratch
-
-The benchmark scripts live under `data-raw/benchmarks/`. Each writes
-its RDS output to `inst/extdata/`.
-
-```{r rerun, eval = FALSE}
-# Strict-gate null calibration (~5 min, 50 iters x 3 sample sizes)
-source("data-raw/benchmarks/bench_null_hires.R")
-
-# Relaxed-gate null calibration
-source("data-raw/benchmarks/bench_null_hires_relaxed.R")
-
-# Power benchmark (~30 min, 4 effect sizes x 3 sample sizes x 30 iters)
-source("data-raw/benchmarks/bench_power.R")
-
-# Relaxed-gate power
-source("data-raw/benchmarks/bench_power_relaxed.R")
-
-# Runtime / memory (~10 min, 3 sizes x 3 reps)
-source("data-raw/benchmarks/bench_runtime.R")
-```
+Run `export_vignette_cache.R` with the benchmark results directory and the
+`power_matched` directory to update the bundled tables.
 
 ## Session info
+
+This is the vignette-rendering session. Benchmark runs used the R version
+and settings described above.
 
 ```{r session-info}
 sessionInfo()

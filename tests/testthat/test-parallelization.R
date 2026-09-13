@@ -27,10 +27,13 @@ test_that("per-celltype fan-out via future_lapply matches a single run_ripple ca
 
   # --- Serial baseline ---
   serial_dir <- withr::local_tempdir()
-  serial_result <- suppressMessages(do.call(
+  # Coordinate-frame overlap in the mock data is incidental to this test; see
+  # helper-frame-warning.R. It must be muffled on BOTH arms, or the comparison
+  # below is between one arm that warned and one that did not.
+  serial_result <- without_frame_warning(suppressMessages(do.call(
     run_ripple,
     c(list(input = spe, output_dir = serial_dir), common_args)
-  ))
+  )))
 
   # --- Parallel fan-out (multisession, 2 workers) ---
   # Wrap in withr so we restore the plan even if the test errors.
@@ -38,7 +41,7 @@ test_that("per-celltype fan-out via future_lapply matches a single run_ripple ca
   withr::defer(future::plan(old_plan))
 
   par_root <- withr::local_tempdir()
-  par_list <- future.apply::future_lapply(targets, function(ct) {
+  par_list <- without_frame_warning(future.apply::future_lapply(targets, function(ct) {
     keep <- spe$cell_type %in% c(query, ct)
     spe_sub <- spe[, keep]
     suppressMessages(do.call(ripple::run_ripple, c(
@@ -50,7 +53,7 @@ test_that("per-celltype fan-out via future_lapply matches a single run_ripple ca
       ),
       common_args
     )))
-  }, future.seed = TRUE)
+  }, future.seed = TRUE))
   names(par_list) <- targets
   par_combined <- data.table::rbindlist(par_list, fill = TRUE)
 

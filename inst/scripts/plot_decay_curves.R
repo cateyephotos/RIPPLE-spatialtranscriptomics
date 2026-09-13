@@ -183,13 +183,34 @@ if (nchar(CONDITION_VAL) > 0) {
 coord_cols <- get_coord_columns(cell_data)
 coords <- as.matrix(cell_data[, ..coord_cols])
 
-# Identify query cells and compute distances
-query_mask <- cell_data[[CELLTYPE_COL]] == QUERY_CELLTYPE
-query_coords <- coords[query_mask, , drop = FALSE]
+# Identify query cells and compute distances. NA-safe mask: an == comparison
+# yields NA for unannotated cells, which would inject NA-coordinate rows into
+# the search reference.
+query_mask <- !is.na(cell_data[[CELLTYPE_COL]]) &
+  cell_data[[CELLTYPE_COL]] == QUERY_CELLTYPE
 message("Query cells (", QUERY_CELLTYPE, "): ", sum(query_mask))
 
-nn_result <- nn2(query_coords, coords, k = 1)
-cell_data[, dist_to_query := pmin(as.vector(nn_result$nn.dists), MAX_DISTANCE_UM)]
+# Distance to query, PARTITIONED BY SAMPLE. A pooled search over cells from
+# more than one section returns the nearest query cell from ANY sample, because
+# sections routinely share a coordinate frame. See
+# calculate_distance_to_type_by_sample() in utils.R.
+check_coordinate_frames(coords, cell_data[[SAMPLE_COL]],
+                        target_mask = query_mask)
+cell_data[, dist_to_query := pmin(
+  calculate_distance_to_type_by_sample(
+    coords, cell_data[[SAMPLE_COL]], query_mask, k = 1
+  ),
+  MAX_DISTANCE_UM
+)]
+
+# A sample with no query cells has no distance to measure from, so drop it
+# rather than let NA reach the plots.
+n_no_dist <- sum(is.na(cell_data$dist_to_query))
+if (n_no_dist > 0) {
+  warning(n_no_dist, " cell(s) are in a sample with no ", QUERY_CELLTYPE,
+          " cells and are excluded.", call. = FALSE)
+  cell_data <- cell_data[!is.na(dist_to_query)]
+}
 
 # Get expression matrix (we'll subset per gene)
 expr_matrix <- GetAssayData(obj, layer = "data")

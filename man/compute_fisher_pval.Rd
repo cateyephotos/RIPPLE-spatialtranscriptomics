@@ -67,12 +67,18 @@ Fisher's method combines independent p-values:
 
 where k is the number of p-values. The sign consistency gate ensures
 that the combined result is only significant when replicates agree on
-the direction of the effect. Genes with contradictory directions across
-samples get \code{fisher_pval = 1} regardless of their individual
-p-values.
+the direction of the effect at the requested threshold. With the default
+strict gate, contradictory nonzero signs give \code{fisher_pval = 1}
+regardless of individual p-values.
 
-P-values are clamped to a minimum of \code{1e-15} to avoid
-\code{log(0)}.
+Zero p-values remain valid for the median, sign gate, and replicate counts.
+Before Fisher combination, p-values below \code{1e-15} are set to that
+floor. Non-finite p-values or coefficients and probabilities outside
+\code{[0, 1]} are excluded. The sign fraction is calculated over nonzero
+coefficients; exact-zero coefficients do not count as dissenting signs.
+The returned p-value is unadjusted; \code{run_ripple()} applies BH within
+each target cell type. Combining replicates does not correct violations
+of the within-sample model assumptions.
 }
 \examples{
 \dontrun{

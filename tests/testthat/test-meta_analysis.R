@@ -1,3 +1,40 @@
+test_that("zero p-values retain strong replicates in Fisher combination", {
+  result <- compute_fisher_pval(c(0, 0, 0), c(-0.02, -0.03, -0.04))
+  expected_stat <- -2 * 3 * log(1e-15)
+  expect_equal(result$n_valid, 3L)
+  expect_equal(result$n_sig_samples, 3L)
+  expect_equal(result$median_coef, -0.03)
+  expect_equal(result$sign_consistency, 1)
+  expect_equal(result$fisher_stat, expected_stat)
+  expect_equal(result$fisher_pval,
+    stats::pchisq(expected_stat, df = 6, lower.tail = FALSE))
+})
+
+test_that("an underflowed opposing replicate still fails the sign gate", {
+  result <- compute_fisher_pval(c(0, 0.001, 0.001), c(0.02, -0.01, -0.01))
+  expect_equal(result$n_valid, 3L)
+  expect_equal(result$n_sig_samples, 3L)
+  expect_equal(result$sign_consistency, 2 / 3)
+  expect_equal(result$fisher_pval, 1)
+})
+
+test_that("zero p-values count towards the optional significance gate", {
+  result <- compute_fisher_pval(c(0, 0.01, 0.8), c(-0.03, -0.02, -0.01),
+    min_sig_fraction = 2 / 3)
+  expect_equal(result$n_sig_samples, 2L)
+  expect_lt(result$fisher_pval, 0.05)
+  expect_equal(result$median_coef, -0.02)
+})
+
+test_that("invalid probabilities and nonfinite coefficients are excluded", {
+  result <- compute_fisher_pval(
+    c(0, 0.01, NA, NaN, Inf, -0.1, 1.1, 0.01),
+    c(-0.03, -0.01, -1, -1, -1, -1, -1, Inf))
+  expect_equal(result$n_valid, 2L)
+  expect_equal(result$median_coef, -0.02)
+  expect_true(is.finite(result$fisher_pval))
+})
+
 test_that("compute_fisher_pval combines consistent results", {
   # 4 samples all showing negative effect
   pvals <- c(0.01, 0.02, 0.05, 0.03)

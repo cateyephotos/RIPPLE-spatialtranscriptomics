@@ -177,6 +177,10 @@ print(summary_dt)
 # ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
-out_path <- "data-raw/benchmarks/results/bench_runtime_results.rds"
+# Set RIPPLE_BENCH_DIR to choose a separate output directory.
+bench_dir <- Sys.getenv("RIPPLE_BENCH_DIR",
+                        unset = "data-raw/benchmarks/results")
+dir.create(bench_dir, recursive = TRUE, showWarnings = FALSE)
+out_path <- file.path(bench_dir, "bench_runtime_results.rds")
 saveRDS(list(per_run = results_dt, summary = summary_dt), file = out_path)
 cat("\nSaved:", out_path, "\n")

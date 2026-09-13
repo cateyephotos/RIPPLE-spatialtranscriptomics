@@ -1,8 +1,8 @@
 ---
-title: "RIPPLE applied to CosMx NSCLC: reproducing paper Figure 3"
+title: "RIPPLE applied to CosMx NSCLC: a worked example"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{RIPPLE applied to CosMx NSCLC: reproducing paper Figure 3}
+  %\VignetteIndexEntry{RIPPLE applied to CosMx NSCLC: a worked example}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -34,11 +34,14 @@ one biological replicate. Tumor cells are the query. The question:
 which genes in the other cell types change expression with distance to
 the nearest tumor cell, reproducibly across the 5 patients.
 
-This vignette reproduces the panels of **paper Figure 3** (A–F). Follow
+This vignette follows the layout of **paper Figure 3** (A–F). Follow
 it to see how to use RIPPLE and what the outputs look like. Panel A
 (the k-diagnostic) is covered in the "Choosing `k_neighbors`" section
 below; panels B–F are in the "Reproducing paper Figure 3" section. Each
-panel uses cached results bundled with the package. Running the analysis
+panel uses historical cached results bundled with the package, predating
+the recent inference fixes. Their counts and rankings differ from the
+updated manuscript figures. The API examples below describe current behavior.
+Running the analysis
 from scratch on the raw 2.6 GB h5ad takes about 6 hours on a 16-core
 machine. We show that step but do not run it.
 
@@ -126,17 +129,15 @@ Key parameter choices for the main ripple function:
 
 - **`k_neighbors = 1`**: distance to the single nearest tumor cell;
   appropriate for paracrine signalling range. Run the diagnostic and pick. Alternatively, run the whole analysis with a few different k values.
-- **`max_distance_um = 200`**: cells beyond 200 µm are excluded from the
-  GLM. Captures typical secreted-factor gradients without long-range
-  dilution. Can be shortened for certain factors or increased for others (ex. morphogens).
+- **`max_distance_um = 200`**: farther cells remain in the GLM with distance
+  capped at 200 µm, fitting a plateau beyond that distance.
 - **`sample_column = "patient"`**: each patient is one biological
   replicate (N = 5). Per-patient coefficients are combined via Fisher's
   combined p-value with sign-consistency gating.
 - **`n_permutations = 0`**: permutation testing skipped here. It is an
-  optional validation step (why/when: run it to confirm a gradient is
-  specific to the query labels and not an artefact of cell density);
-  add it later via `run_permutation_tests()` or the GPU script in
-  `inst/python/`. The gpu version is much faster, so if you have the option...
+  optional test of query-location specificity. The R API uses non-target
+  pseudo-query candidates; the standalone GPU script retains the legacy
+  full-cell pool (see the permutation section below).
 
 ## Loading cached results
 
@@ -670,14 +671,10 @@ L-R views all converge on the same stromal-remodelling biology. CD44
 that is an artefact, not biology. That is why the query-signature
 check matters.
 
-## Reproducing the full multi-panel figure
+## Assembling the panels
 
-The exact PDF used in the paper is rendered by:
-
-```{r render-fig4, eval = FALSE}
-source("paper/render_figures.R")
-# writes paper/figures/fig_3_cosmx.{pdf,png}
-```
+The plotting chunks above can be combined with `patchwork`. The private
+manuscript renderer is not required or distributed with the package.
 
 # Beyond Figure 3: macrophage deep-dive, specificity, and QC
 
@@ -836,16 +833,21 @@ table(stage4$classification)
 
 Each Stage 1 gene is reclassified from how its query coefficient behaves
 once distance-to-control is in the model. The `classification` column
-takes five values (the query-specific label is prefixed with
+takes the following values (the query-specific label is prefixed with
 `query_label`, e.g. `Tumor_specific`):
 
 | Classification | Meaning |
 |---|---|
-| `Tumor_specific` | Fisher FDR < threshold in the bivariate model, same sign as Stage 1 — the gradient holds after controlling for the niche. |
-| `enhanced` | query-specific AND `abs(coef)` grew > 1.1× vs Stage 1 — the control was masking the effect. |
-| `niche_driven` | FDR ≥ threshold AND `abs(coef)` attenuated > 50% — the gradient was largely the shared niche. |
-| `underpowered` | FDR ≥ threshold AND `abs(coef)` preserved ≥ 50% — direction holds but significance was lost (often a power issue). |
-| `reversed` | coefficient flipped sign after controlling for the confounder. |
+| `Tumor_specific` | Fisher FDR < threshold, same sign as Stage 1, without >10% coefficient growth. |
+| `enhanced` | Significant with the same sign and >10% growth in absolute coefficient. |
+| `niche_driven` | FDR ≥ threshold and >50% attenuation in absolute coefficient. |
+| `underpowered` | FDR ≥ threshold and ≥50% of the absolute coefficient retained. |
+| `reversed` | Significant with the opposite sign to Stage 1. |
+| `no_stage2_result` | No combined result, including fewer than two valid fits. |
+| `unclassified` | Available values do not meet another classification rule. |
+
+Indistinguishable query and control predictors yield `fit_status = "rank_deficient"`
+and are excluded from aggregation. `stage2_n_rank_deficient` counts these fits.
 
 Because the bivariate GLM fits only one extra linear distance term, these
 labels are hypothesis-generating, not a definitive causal decomposition.
@@ -862,15 +864,13 @@ plot_confounder_scatter(
 )
 ```
 
-If no cell type is both niche-sharing and biologically distinct from the
-query, skip Stage 4 and lean on the permutation null instead.
+If no suitable control population exists, skip Stage 4. The permutation
+test below addresses a different question.
 
 ## Stage 2: permutation validation
 
-**Why/when:** run it to confirm a gradient is specific to the query
-labels and not an artefact of overall cell density. The simplest route
-is to set `n_permutations` on the main `run_ripple()` call (a GPU script,
-`inst/python/run_permutation_gpu.py`, is faster for large datasets):
+**Why/when:** compare the observed query locations with random non-target
+locations. Set `n_permutations` on the main `run_ripple()` call:
 
 ```{r perm-run, eval = FALSE}
 results_perm <- run_ripple(
@@ -880,26 +880,30 @@ results_perm <- run_ripple(
   sample_column   = "patient",
   output_dir      = "ripple_output",
   analysis_name   = "tumor_ripple_perm",
-  n_permutations  = 1000            # adds a perm_pval column
+  n_permutations  = 1000,           # adds a perm_pval column
+  permutation_pool = "non_target"  # default
 )
 ```
 
-Within each sample the permutation draws N random cells (N = the sample's
-query count) from the *full* cell pool to serve as pseudo-query anchors,
-recomputes distances, and refits — building an empirical null for the
-combined coefficient. Note the null tests **location specificity of the
-query**, not specificity against one particular competing cell type; for
-the latter, restrict the permutation to the two populations of interest.
-The Fisher combination and sign gate are not applied on the permutation
-path.
+Within each sample, pseudo-query cells are drawn from all non-target cells,
+preserving the query count. Distances are recomputed with the same k and cap,
+and refitted coefficients are summarized by their median. The two-sided
+empirical p-value compares absolute observed and null medians with a plus-one
+correction. Fisher combination and the sign gate are not applied here.
+This tests query-location specificity, not specificity against a particular
+alternative cell type.
+
+Use `permutation_pool = "all"` to reproduce full-cell-pool sampling. The
+standalone R/GPU scripts retain that legacy pool. Direct calls to
+`run_permutation_test()` or `run_permutation_tests()` require `target_mask_all`
+for the new default, marking every target-population cell in `coords_all`.
+Too few non-target candidates raises an error rather than changing query count.
 
 ## Spatial autocorrelation diagnostic
 
-The per-sample Poisson GLM assumes independent observations, but nearby
-cells are spatially correlated. Per-sample fitting plus Fisher
-aggregation mitigates this at the sample level; within-sample Wald
-p-values can still be anti-conservative. `check_spatial_autocorrelation()`
-computes Moran's I on the GLM deviance residuals for a set of genes:
+Nearby cells can remain correlated after fitting. Replicate aggregation
+does not correct this within-sample dependence. `check_spatial_autocorrelation()`
+computes Moran's I on per-sample GLM deviance residuals:
 
 ```{r moran, eval = FALSE}
 moran <- check_spatial_autocorrelation(
@@ -909,15 +913,17 @@ moran <- check_spatial_autocorrelation(
   target_celltype = "fibroblast",
   query_celltype  = "tumor",
   sample_column   = "patient",
-  k               = 20
+  k               = 20,   # Moran neighbor graph
+  k_neighbors     = 1,    # query-distance setting from the main run
+  max_distance_um = 200,
+  min_cells_per_sample = 30
 )
 ```
 
-Read it as: `|I| < 0.05` is consistent with the independence assumption;
-`|I| > 0.15` flags non-negligible residual autocorrelation, so interpret
-that gene's within-sample p-values with caution and cross-check with the
-permutation null. This is not run by default; reach for it on specific
-genes of interest.
+Use the same input subset and distance settings as the main analysis.
+Farther cells remain at the distance cap. Inspect Moran's I and its p-value
+per sample; a small I does not establish independence or calibrated Wald
+p-values. The diagnostic does not rerun cross-sample gene filtering.
 
 # Interpretation summary
 

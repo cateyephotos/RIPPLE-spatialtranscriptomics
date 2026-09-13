@@ -3,6 +3,7 @@
 # pipeline.R
 export(run_ripple)
 export(run_ripple_confounder)
+export(consolidate_parallel_ripple)
 export(merge_ripple_results)
 
 # config.R
@@ -34,6 +35,8 @@ export(get_coord_columns)
 export(build_knn_graph)
 export(build_radius_graph)
 export(calculate_distance_to_type)
+export(calculate_distance_to_type_by_sample)
+export(check_coordinate_frames)
 export(check_spatial_autocorrelation)
 export(get_neighbor_cell_types)
 export(calculate_neighbor_composition)

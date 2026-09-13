@@ -1,3 +1,17 @@
+# ripple (development version)
+
+* Calculate distances and spatial neighbors within each biological sample.
+  Add `calculate_distance_to_type_by_sample()` and `check_coordinate_frames()`.
+* Retain zero-valued Wald p-values in replicate aggregation and sign checking.
+* Match residual spatial diagnostics to the analysis distance settings.
+* Report confounder fits whose distance effects cannot be estimated separately.
+* Exclude target cells from the default query-location permutation pool.
+  Direct calls require `target_mask_all`; `permutation_pool = "all"` preserves
+  the previous behavior. The standalone R/GPU scripts retain the full pool.
+* Update synthetic benchmarks with matched-expression recovery and runtime
+  results. Count filtered planted genes as missed detections and distinguish
+  pooled per-gene FPR from complete-null empirical FDR.
+
 # ripple 0.1.0
 
 Initial release of the RIPPLE package, accompanying the preprint. Version

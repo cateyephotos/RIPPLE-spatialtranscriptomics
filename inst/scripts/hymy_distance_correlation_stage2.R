@@ -1,4 +1,6 @@
 #!/usr/bin/env Rscript
+# Legacy standalone pipeline: use ripple::run_ripple_confounder() for the
+# current package behavior, including rank-deficient predictor handling.
 #' =============================================================================
 #' RIPPLE Stage 4: Confounder Control (Bivariate Poisson GLM)
 #' =============================================================================
@@ -320,12 +322,26 @@ message(strrep("=", 70))
 coord_cols <- get_coord_columns(cell_data)
 coords <- as.matrix(cell_data[, ..coord_cols])
 
-# Distance to query cell type
-query_mask <- cell_data[[CELLTYPE_COL]] == QUERY_CELLTYPE
+# All three distances below are PARTITIONED BY SAMPLE. A pooled search over
+# cells from more than one section returns the nearest cell from ANY sample,
+# because sections routinely share a coordinate frame, and aggregating per
+# sample afterwards does not repair it. See
+# calculate_distance_to_type_by_sample() in utils.R.
+sample_ids_all <- cell_data[[SAMPLE_COL]]
+
+# Distance to query cell type. NA-safe mask: an == comparison yields NA for
+# unannotated cells, which would inject NA-coordinate rows into the reference.
+query_mask <- !is.na(cell_data[[CELLTYPE_COL]]) &
+  cell_data[[CELLTYPE_COL]] == QUERY_CELLTYPE
 message("Query cells (", QUERY_CELLTYPE, "): ", sum(query_mask))
-query_coords <- coords[query_mask, , drop = FALSE]
-nn_hymy <- nn2(query_coords, coords, k = 1)
-cell_data[, dist_to_hymy := pmin(as.vector(nn_hymy$nn.dists), MAX_DISTANCE_UM)]
+
+# The frame check needs the query mask to measure severity, so it comes after.
+check_coordinate_frames(coords, sample_ids_all, target_mask = query_mask)
+cell_data[, dist_to_hymy := pmin(
+  calculate_distance_to_type_by_sample(coords, sample_ids_all, query_mask,
+                                       k = 1),
+  MAX_DISTANCE_UM
+)]
 
 # =============================================================================
 # Calculate Distances to Control Cells (Monocyte or Macrophages)
@@ -335,7 +351,8 @@ cell_data[, dist_to_hymy := pmin(as.vector(nn_hymy$nn.dists), MAX_DISTANCE_UM)]
 # Default is Monocyte, but for Monocyte target we use Macrophages
 message("\nCalculating distance to control cells...")
 
-control_mask <- cell_data[[CELLTYPE_COL]] == CONTROL_CELLTYPE
+control_mask <- !is.na(cell_data[[CELLTYPE_COL]]) &
+  cell_data[[CELLTYPE_COL]] == CONTROL_CELLTYPE
 n_control_total <- sum(control_mask)
 message("Control cells (", CONTROL_CELLTYPE, "): ", n_control_total)
 
@@ -343,23 +360,46 @@ if (n_control_total < MIN_CONTROL_CELLS) {
   stop("Too few control cells (", n_control_total, ") for reliable distance calculation")
 }
 
-control_coords <- coords[control_mask, , drop = FALSE]
-nn_control <- nn2(control_coords, coords, k = 1)
-cell_data[, dist_to_control := pmin(as.vector(nn_control$nn.dists), MAX_DISTANCE_UM)]
+cell_data[, dist_to_control := pmin(
+  calculate_distance_to_type_by_sample(coords, sample_ids_all, control_mask,
+                                       k = 1),
+  MAX_DISTANCE_UM
+)]
 
 # For Monocyte target: use Macrophages as alternative control
 alt_control <- "Macrophages"
-alt_control_mask <- cell_data[[CELLTYPE_COL]] == alt_control
+alt_control_mask <- !is.na(cell_data[[CELLTYPE_COL]]) &
+  cell_data[[CELLTYPE_COL]] == alt_control
 n_alt_control <- sum(alt_control_mask)
 message("Alternative control cells (", alt_control, "): ", n_alt_control)
 
 if (n_alt_control >= MIN_CONTROL_CELLS) {
-  alt_control_coords <- coords[alt_control_mask, , drop = FALSE]
-  nn_alt <- nn2(alt_control_coords, coords, k = 1)
-  cell_data[, dist_to_alt_control := pmin(as.vector(nn_alt$nn.dists), MAX_DISTANCE_UM)]
+  cell_data[, dist_to_alt_control := pmin(
+    calculate_distance_to_type_by_sample(coords, sample_ids_all,
+                                         alt_control_mask, k = 1),
+    MAX_DISTANCE_UM
+  )]
 } else {
   message("  WARNING: Too few alternative control cells for Monocyte target analysis")
   cell_data[, dist_to_alt_control := NA_real_]
+}
+
+# A sample missing the query or the control cell type yields NA for that
+# distance, which the bivariate GLM and the collinearity diagnostic cannot
+# use. The pooled search this replaces could not produce NA, since it happily
+# returned a cell from another sample, so nothing downstream expects it.
+n_no_dist <- sum(is.na(cell_data$dist_to_hymy) |
+                   is.na(cell_data$dist_to_control))
+if (n_no_dist > 0) {
+  warning(n_no_dist, " cell(s) are in a sample missing ", QUERY_CELLTYPE,
+          " or ", CONTROL_CELLTYPE,
+          " cells, so one distance is undefined. They are excluded.",
+          call. = FALSE)
+  cell_data <- cell_data[!is.na(dist_to_hymy) & !is.na(dist_to_control)]
+  if (nrow(cell_data) == 0) {
+    stop("No cells remain after dropping samples that lack the query or ",
+         "control cell type.", call. = FALSE)
+  }
 }
 
 # Per-sample control cell counts (for flagging unreliable samples)

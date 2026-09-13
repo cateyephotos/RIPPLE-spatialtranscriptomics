@@ -387,14 +387,32 @@ if (nchar(CONDITION_VAL) > 0) {
 coord_cols <- get_coord_columns(tdln_data)
 coords_all <- as.matrix(tdln_data[, ..coord_cols])
 
-# Get query cell coordinates
-query_mask <- tdln_data[[CELLTYPE_COL]] == QUERY_CELLTYPE
-query_coords <- coords_all[query_mask, , drop = FALSE]
+# Identify query cells. NA-safe mask: an == comparison yields NA for
+# unannotated cells, which would inject NA-coordinate rows into the search
+# reference.
+query_mask <- !is.na(tdln_data[[CELLTYPE_COL]]) &
+  tdln_data[[CELLTYPE_COL]] == QUERY_CELLTYPE
 message("Query cells (", QUERY_CELLTYPE, "): ", sum(query_mask))
 
-# Calculate nearest neighbor distances
-nn_result <- nn2(query_coords, coords_all, k = 1)
-tdln_data[, dist_to_query := pmin(as.vector(nn_result$nn.dists), MAX_DISTANCE_UM)]
+# Distance to query, PARTITIONED BY SAMPLE. A pooled search over cells from
+# more than one section returns the nearest query cell from ANY sample, because
+# sections routinely share a coordinate frame. See
+# calculate_distance_to_type_by_sample() in utils.R.
+check_coordinate_frames(coords_all, tdln_data[[SAMPLE_COL]],
+                        target_mask = query_mask)
+tdln_data[, dist_to_query := pmin(
+  calculate_distance_to_type_by_sample(
+    coords_all, tdln_data[[SAMPLE_COL]], query_mask, k = 1
+  ),
+  MAX_DISTANCE_UM
+)]
+
+n_no_dist <- sum(is.na(tdln_data$dist_to_query))
+if (n_no_dist > 0) {
+  warning(n_no_dist, " cell(s) are in a sample with no ", QUERY_CELLTYPE,
+          " cells and are excluded.", call. = FALSE)
+  tdln_data <- tdln_data[!is.na(dist_to_query)]
+}
 
 message("Distance distribution:")
 message("  Median: ", round(median(tdln_data$dist_to_query), 1), " µm")

@@ -453,9 +453,15 @@ plot_gradient_volcano <- function(results, coef_col = "median_coef",
       } else {
         "Distance-Expression Gradient Volcano"
       },
+      # Both denominators matter: how many genes were testable at all (i.e.
+      # passed the per-sample expression filter, which is every row of
+      # `results`) and how many of those cleared the FDR threshold. Reporting
+      # only the numerator hides whether a small hit count means a weak
+      # effect or a heavily filtered gene set.
       subtitle = sprintf(
-        "%d genes significant (FDR < %.2f)",
-        sum(plot_data$significant, na.rm = TRUE), fdr_threshold
+        "%d of %d genes significant (FDR < %.2f)",
+        sum(plot_data$significant, na.rm = TRUE), nrow(plot_data),
+        fdr_threshold
       ),
       x = if (!is.null(x_axis_label)) x_axis_label else
             paste0("Coefficient (negative = ", query_label, "-induced)"),

@@ -76,7 +76,11 @@ suppressPackageStartupMessages({
   devtools::load_all(quiet = TRUE)
 })
 
-out_dir <- "data-raw/cosmx_nsclc/ripple_output"
+# Output directory. Overridable so the Genome Biology revision can be
+# regenerated into a separate folder without overwriting the submitted run:
+#   RIPPLE_OUT_DIR=... Rscript <this script>
+out_dir <- Sys.getenv("RIPPLE_OUT_DIR",
+                      unset = "data-raw/cosmx_nsclc/ripple_output")
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 results <- run_ripple(

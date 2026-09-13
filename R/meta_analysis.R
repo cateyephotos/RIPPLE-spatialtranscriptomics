@@ -56,12 +56,18 @@ NULL
 #'
 #'   where k is the number of p-values. The sign consistency gate ensures
 #'   that the combined result is only significant when replicates agree on
-#'   the direction of the effect. Genes with contradictory directions across
-#'   samples get \code{fisher_pval = 1} regardless of their individual
-#'   p-values.
+#'   the direction of the effect at the requested threshold. With the default
+#'   strict gate, contradictory nonzero signs give \code{fisher_pval = 1}
+#'   regardless of individual p-values.
 #'
-#'   P-values are clamped to a minimum of \code{1e-15} to avoid
-#'   \code{log(0)}.
+#'   Zero p-values remain valid for the median, sign gate, and replicate counts.
+#'   Before Fisher combination, p-values below \code{1e-15} are set to that
+#'   floor. Non-finite p-values or coefficients and probabilities outside
+#'   \code{[0, 1]} are excluded. The sign fraction is calculated over nonzero
+#'   coefficients; exact-zero coefficients do not count as dissenting signs.
+#'   The returned p-value is unadjusted; \code{run_ripple()} applies BH within
+#'   each target cell type. Combining replicates does not correct violations
+#'   of the within-sample model assumptions.
 #'
 #' @examples
 #' \dontrun{
@@ -79,8 +85,9 @@ compute_fisher_pval <- function(pvals, coefs, min_samples = 2,
                                 sign_threshold = 1.0,
                                 min_sig_fraction = 0,
                                 sig_alpha = 0.05) {
-  # Filter to valid entries
-  valid <- !is.na(pvals) & !is.na(coefs) & pvals > 0
+  # A Wald p-value can underflow to zero for a strong effect. Keep that
+  # replicate for sign checking and clamp its p-value below before taking logs.
+  valid <- is.finite(pvals) & is.finite(coefs) & pvals >= 0 & pvals <= 1
   valid_pvals <- pvals[valid]
   valid_coefs <- coefs[valid]
   n_valid <- length(valid_pvals)

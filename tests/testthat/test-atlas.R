@@ -14,7 +14,9 @@ test_that("run_ripple_atlas produces panels from run_ripple output", {
   on.exit(unlink(out_dir, recursive = TRUE), add = TRUE)
 
   # Produce a real results directory (summary/all_genes_results.csv).
-  run_ripple(
+  # The mock data shares one coordinate frame across its three sections, which
+  # is incidental here; see helper-frame-warning.R.
+  without_frame_warning(run_ripple(
     input                = ripple_mock_data,
     query_celltype       = "Tumor",
     celltype_column      = "cell_type",
@@ -24,7 +26,7 @@ test_that("run_ripple_atlas produces panels from run_ripple output", {
     min_expr_pct         = 0,
     min_expr_floor       = 10,
     verbose              = FALSE
-  )
+  ))
   results_dir <- file.path(out_dir, "ripple")
   expect_true(file.exists(
     file.path(results_dir, "summary", "all_genes_results.csv")

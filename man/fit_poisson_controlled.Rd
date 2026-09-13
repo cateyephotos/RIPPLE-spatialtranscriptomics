@@ -33,7 +33,8 @@ controlling for control distance.}
 \item{\code{dispersion}}{Numeric. Overdispersion estimate.}
 \item{\code{n_cells}}{Integer. Number of valid cells used.}
 }
-Returns \code{NULL} if too few expressing cells.
+Returns \code{NULL} if too few cells express the gene, the two distance
+effects cannot be estimated separately, or the fit fails.
 }
 \description{
 Fits a bivariate Poisson GLM with two distance predictors, one to the
@@ -47,6 +48,9 @@ The model is:
     + log(total_counts)}
 
 The returned \code{beta} is for the query distance term only (partial effect).
+Both distance terms and the intercept must be jointly estimable on the
+usable cells. Rank-deficient designs (including constant or linearly
+dependent distances) are rejected rather than fitted as a reduced model.
 If this is significant, the gene's expression gradient near query cells
 persists even after accounting for proximity to the control cell type,
 suggesting a query-specific effect rather than a general niche effect.

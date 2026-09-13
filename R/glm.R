@@ -135,7 +135,8 @@ fit_poisson <- function(counts, distances, total_counts, min_cells = 25) {
 #'   \item{\code{dispersion}}{Numeric. Overdispersion estimate.}
 #'   \item{\code{n_cells}}{Integer. Number of valid cells used.}
 #' }
-#' Returns \code{NULL} if too few expressing cells.
+#' Returns \code{NULL} if too few cells express the gene, the two distance
+#' effects cannot be estimated separately, or the fit fails.
 #'
 #' @details The model is:
 #'
@@ -143,6 +144,9 @@ fit_poisson <- function(counts, distances, total_counts, min_cells = 25) {
 #'     + log(total_counts)}
 #'
 #'   The returned \code{beta} is for the query distance term only (partial effect).
+#'   Both distance terms and the intercept must be jointly estimable on the
+#'   usable cells. Rank-deficient designs (including constant or linearly
+#'   dependent distances) are rejected rather than fitted as a reduced model.
 #'   If this is significant, the gene's expression gradient near query cells
 #'   persists even after accounting for proximity to the control cell type,
 #'   suggesting a query-specific effect rather than a general niche effect.
@@ -161,22 +165,39 @@ fit_poisson <- function(counts, distances, total_counts, min_cells = 25) {
 #' @export
 fit_poisson_controlled <- function(counts, dist_query, dist_control, total_counts,
                                    min_cells = 25) {
+  .fit_poisson_controlled_result(counts, dist_query, dist_control, total_counts,
+                                 min_cells)$fit
+}
+
+# Internal result retains the failure reason for Stage 4 output. The public
+# fit_poisson_controlled() interface continues to return a fit or NULL.
+.fit_poisson_controlled_result <- function(counts, dist_query, dist_control,
+                                            total_counts, min_cells = 25) {
   # Remove NAs and invalid values
   valid_idx <- !is.na(counts) & !is.na(dist_query) & !is.na(dist_control) &
     is.finite(counts) & is.finite(dist_query) & is.finite(dist_control) &
-    !is.na(total_counts) & total_counts > 0
+    is.finite(total_counts) & total_counts > 0
   counts <- counts[valid_idx]
   dist_query <- dist_query[valid_idx]
   dist_control <- dist_control[valid_idx]
   log_total <- log(total_counts[valid_idx])
 
-  if (length(counts) < min_cells) {
-    return(NULL)
+  failed <- function(status) list(fit = NULL, fit_status = status,
+                                  n_cells = length(counts))
+  if (length(counts) < min_cells || sum(counts > 0) < min_cells) {
+    return(failed("insufficient_cells"))
   }
 
-  # Need some non-zero counts for the model to be meaningful
-  if (sum(counts > 0) < min_cells) {
-    return(NULL)
+  # Assess identifiability on the cells actually used, after capping and
+  # invalid-value removal. Scaling prevents distance units driving the check.
+  distances <- cbind(dist_query, dist_control)
+  spread <- apply(distances, 2, stats::sd)
+  if (any(!is.finite(spread)) || any(spread == 0)) {
+    return(failed("rank_deficient"))
+  }
+  design <- cbind(1, scale(distances))
+  if (qr(design, tol = 1e-7)$rank < 3L) {
+    return(failed("rank_deficient"))
   }
 
   # Fit bivariate Poisson GLM with cell-size offset
@@ -190,12 +211,20 @@ fit_poisson_controlled <- function(counts, dist_query, dist_control, total_count
   )
 
   if (is.null(fit) || !fit$converged) {
-    return(NULL)
+    return(failed("glm_failed"))
   }
+  # IRLS can lose rank through its working weights even for a full-rank
+  # unweighted design. Never accept a model with an aliased control term.
+  if (fit$rank < 3L) return(failed("rank_deficient"))
 
   coef_summary <- summary(fit)$coefficients
-  if (!"dist_query" %in% rownames(coef_summary)) {
-    return(NULL)
+  terms <- c("dist_query", "dist_control")
+  if (!all(terms %in% rownames(coef_summary))) {
+    return(failed("rank_deficient"))
+  }
+  if (fit$df.residual <= 0 || any(!is.finite(coef_summary[terms, ])) ||
+      any(coef_summary[terms, "Std. Error"] <= 0)) {
+    return(failed("invalid_fit"))
   }
 
   # Overdispersion diagnostic (guard against zero residual df).
@@ -205,13 +234,13 @@ fit_poisson_controlled <- function(counts, dist_query, dist_control, total_count
     NA_real_
   }
 
-  list(
+  list(fit = list(
     beta = coef_summary["dist_query", "Estimate"], # log-rate change per um
     se = coef_summary["dist_query", "Std. Error"],
     pval = coef_summary["dist_query", "Pr(>|z|)"], # Wald z-test
     dispersion = dispersion,
     n_cells = length(counts)
-  )
+  ), fit_status = "ok", n_cells = length(counts))
 }
 
 

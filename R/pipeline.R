@@ -171,10 +171,14 @@ NULL
 #'   (default: \code{NULL} = auto-detect all non-query types).
 #' @param k_neighbors Number of nearest query cells for distance calculation
 #'   (default: \code{1}).
-#' @param max_distance_um Maximum distance in micrometers to consider
-#'   (default: \code{200}).
+#' @param max_distance_um Distance cap in micrometers (default: \code{200}).
+#'   Farther cells remain in the model with their distance set to this value.
 #' @param n_permutations Number of label permutations for null distribution
 #'   (default: \code{0} = skip permutation testing).
+#' @param permutation_pool Pseudo-query candidates for optional permutation
+#'   tests: \code{"non_target"} (default) excludes all cells of the target
+#'   population within each sample. \code{"all"} reproduces previous full-pool
+#'   sampling. The selected mode is recorded in permutation result tables.
 #' @param fdr_threshold FDR cutoff for significance
 #'   (default: \code{0.05}).
 #' @param min_cells_per_sample Minimum cells of target type per sample
@@ -322,7 +326,8 @@ run_ripple <- function(
     min_sig_fraction = 0,
     sig_alpha = 0.05,
     assay = NULL,
-    verbose = TRUE) {
+    verbose = TRUE,
+    permutation_pool = c("non_target", "all")) {
   # --------------------------------------------------------------------------
   # 0. Resolve defaults from package options
   # --------------------------------------------------------------------------
@@ -341,6 +346,7 @@ run_ripple <- function(
 
   if (is.null(query_label)) query_label <- query_celltype
   organism <- match.arg(organism)
+  permutation_pool <- match.arg(permutation_pool)
   # Priority genes are resolved after the counts load (below) so "auto" can
   # infer the species from the gene symbols in the data.
   resolve_priority_genes <- is.null(priority_genes)
@@ -587,17 +593,85 @@ run_ripple <- function(
     .msg("  ", samp, ": ", query_per_sample[samp], verbose = verbose)
   }
 
-  query_coords <- coords[query_mask, , drop = FALSE]
-
-  # k-NN distance calculation
-  effective_k <- min(k_neighbors, nrow(query_coords))
-  .msg("Computing ", effective_k, "-NN distances...", verbose = verbose)
-  nn_result <- RANN::nn2(query_coords, coords, k = effective_k)
-
-  if (effective_k == 1) {
-    cell_data[, dist_to_query := as.vector(nn_result$nn.dists)]
+  # Coordinate-frame diagnostic. Harmless for RIPPLE now that the search below
+  # is partitioned, so the console line is informational and respects verbose.
+  # The warning inside fires only when the overlap is severe, meaning it would
+  # measurably change a pooled analysis, and warnings are not verbosity-gated
+  # because at that point it is actionable for the user's other tools.
+  # Either way the numbers are written to qc/coordinate_frames.csv below, so
+  # the run record carries them whether or not anyone was watching.
+  frame_check <- check_coordinate_frames(
+    coords, sample_ids_all,
+    target_mask = query_mask, warn = TRUE
+  )
+  if (isTRUE(frame_check$overlaps)) {
+    .msg("Coordinate frames: ", frame_check$n_overlapping_pairs, " of ",
+      frame_check$n_pairs, " sample pairs overlap (area ratio ",
+      round(frame_check$ratio, 2), "); ",
+      if (is.na(frame_check$cross_sample_fraction)) {
+        "cross-sample fraction not measured"
+      } else {
+        paste0(round(100 * frame_check$cross_sample_fraction, 1),
+          "% of cells would take a cross-sample neighbour under a pooled search"
+        )
+      },
+      verbose = verbose
+    )
   } else {
-    cell_data[, dist_to_query := rowMeans(nn_result$nn.dists)]
+    .msg("Coordinate frames: no sample pair overlaps.", verbose = verbose)
+  }
+
+  # k-NN distance calculation, PARTITIONED BY SAMPLE.
+  #
+  # This must not be a single pooled RANN::nn2(query_coords, coords) call.
+  # Tissue sections routinely occupy overlapping coordinate ranges (each
+  # section's coordinates start near zero in its own frame), so a pooled
+  # search returns the nearest query cell from ANY sample. Aggregating
+  # afterwards does not repair it: the per-sample GLM, the per-sample medians
+  # and the sign-consistency gate would all run on distances that already
+  # crossed sample boundaries.
+  effective_k <- min(k_neighbors, sum(query_mask))
+  .msg("Computing ", effective_k, "-NN distances within each sample...",
+    verbose = verbose
+  )
+  # Quiet variant: the warning raised below is more specific, since it can name
+  # the query cell type and say the cells were dropped.
+  dist_by_sample <- .dist_by_sample_quiet(
+    coords      = coords,
+    sample_ids  = sample_ids_all,
+    target_mask = query_mask,
+    k           = k_neighbors
+  )
+  cell_data[, dist_to_query := dist_by_sample]
+
+  # A sample with no query cells has no distance to measure from, so its cells
+  # carry NA. They must be dropped here rather than left to flow downstream:
+  # NA propagates into the distance-cap fraction, the QC summaries and the
+  # per-sample GLM. The pooled search this replaces could not produce NA, since
+  # it happily returned a query cell from some other sample, so nothing further
+  # down was ever written to expect it.
+  n_no_dist <- sum(is.na(dist_by_sample))
+  if (n_no_dist > 0) {
+    samples_no_query <- unique(sample_ids_all[is.na(dist_by_sample)])
+    warning(
+      n_no_dist, " cell(s) in ", length(samples_no_query), " sample(s) with no ",
+      query_celltype, " cells (", paste(samples_no_query, collapse = ", "),
+      ") have no distance to a query cell and are excluded from the analysis.",
+      call. = FALSE
+    )
+    cell_data <- cell_data[!is.na(dist_to_query)]
+    if (nrow(cell_data) == 0) {
+      stop("No cells remain after dropping samples without query cells.",
+        call. = FALSE
+      )
+    }
+    if (data.table::uniqueN(cell_data[[sample_column]]) < 2) {
+      warning("Only ", data.table::uniqueN(cell_data[[sample_column]]),
+        " sample(s) retain query cells. Fisher combination across samples ",
+        "and the sign-consistency gate lose their meaning with one sample.",
+        call. = FALSE
+      )
+    }
   }
 
   # Cap distances
@@ -694,6 +768,25 @@ run_ripple <- function(
   ), by = c(sample_column, "condition")]
   data.table::fwrite(sample_summary, file.path(qc_dir, "sample_summary.csv"))
   .msg("  Saved: qc/sample_summary.csv", verbose = verbose)
+
+  # Coordinate-frame diagnostic. Written unconditionally so the numbers behind
+  # any overlap warning stay in the run record and can be quoted later.
+  data.table::fwrite(
+    data.table::data.table(
+      n_samples = data.table::uniqueN(sample_ids_all),
+      n_pairs = frame_check$n_pairs,
+      n_overlapping_pairs = frame_check$n_overlapping_pairs,
+      overlaps = frame_check$overlaps,
+      area_ratio = frame_check$ratio,
+      sum_sample_area = frame_check$sum_sample_area,
+      global_area = frame_check$global_area,
+      cross_sample_fraction = frame_check$cross_sample_fraction,
+      n_cells_checked = frame_check$n_cells_checked,
+      severe = frame_check$severe
+    ),
+    file.path(qc_dir, "coordinate_frames.csv")
+  )
+  .msg("  Saved: qc/coordinate_frames.csv", verbose = verbose)
 
   # Cell type counts
   celltype_counts <- cell_data[, .N, by = c(celltype_column)]
@@ -1020,7 +1113,9 @@ run_ripple <- function(
         max_distance_um = max_distance_um,
         min_cells_per_sample = min_cells_per_sample,
         min_expr_cells = min_expr_cells_glm,
-        total_counts_target = total_counts[target_barcodes]
+        total_counts_target = total_counts[target_barcodes],
+        permutation_pool = permutation_pool,
+        target_mask_all = !is.na(celltypes_all) & celltypes_all == ct_name
       )
 
       meta_results <- merge(meta_results, perm_results,
@@ -1344,7 +1439,8 @@ run_ripple <- function(
 #' @param min_cells_per_sample Minimum cells per sample (default: \code{30}).
 #' @param min_control_cells Minimum control cells per sample for reliable
 #'   distance calculation (default: \code{30}).
-#' @param max_distance_um Maximum distance in micrometers (default: \code{200}).
+#' @param max_distance_um Distance cap in micrometers (default: \code{200})
+#'   for both query and control predictors. Farther cells remain in the model.
 #' @param sig_column Which column from Stage 1 results to use for selecting
 #'   significant genes. Typically \code{"fisher_fdr"} (default) or
 #'   \code{"fdr"}.
@@ -1363,18 +1459,30 @@ run_ripple <- function(
 #'   \code{cell_type}, \code{stage1_coef}, \code{stage2_median_coef},
 #'   \code{stage2_fisher_fdr}, \code{classification},
 #'   \code{control_celltype}.
+#'   Per-sample output includes \code{fit_status}; \code{rank_deficient}
+#'   means the query and control effects cannot be estimated separately.
+#'   Such fits have missing coefficients and p-values and are excluded from
+#'   aggregation. The comparison reports \code{stage2_n_rank_deficient}; genes
+#'   with fewer than two valid fits receive \code{no_stage2_result}.
 #'
 #' @section Gene classification:
 #' \describe{
 #'   \item{query_specific}{Fisher FDR < threshold in Stage 4, same sign as
-#'     Stage 1. The gradient persists after controlling for the niche.}
-#'   \item{enhanced}{query_specific AND absolute coefficient is > 1.1x
-#'     Stage 1 value. The control was suppressing the signal.}
-#'   \item{niche_driven}{FDR >= threshold AND coefficient attenuated > 50\%.
-#'     The gradient was explained by the shared niche.}
-#'   \item{underpowered}{FDR >= threshold AND coefficient preserved >= 50\%.
-#'     Likely a power issue from SE inflation, not a true niche effect.}
+#'     Stage 1, without more than 10 percent growth in absolute coefficient.}
+#'   \item{enhanced}{FDR < threshold, same sign as Stage 1, and absolute
+#'     coefficient greater than 1.1 times the Stage 1 value.}
+#'   \item{niche_driven}{FDR >= threshold AND absolute coefficient attenuated
+#'     by more than 50 percent.}
+#'   \item{underpowered}{FDR >= threshold AND at least 50 percent of the
+#'     absolute coefficient retained.}
+#'   \item{reversed}{FDR < threshold with a sign opposite to Stage 1.}
+#'   \item{no_stage2_result}{No combined Stage 4 result, including cases with
+#'     fewer than two valid fits after excluding rank-deficient predictors.}
+#'   \item{unclassified}{Fallback when the available values do not satisfy
+#'     any classification rule.}
 #' }
+#' These classifications describe coefficient changes and are
+#' hypothesis-generating, rather than a causal decomposition.
 #'
 #' @examples
 #' \dontrun{
@@ -1613,10 +1721,16 @@ run_ripple_confounder <- function(
   if (sum(query_mask) < 10) {
     stop("Too few query cells (", sum(query_mask), ").", call. = FALSE)
   }
-  query_coords <- coords[query_mask, , drop = FALSE]
-  nn_query <- RANN::nn2(query_coords, coords, k = 1)
+  # Partitioned by sample: sections routinely share a coordinate frame, so a
+  # pooled search would return the nearest query cell from any sample. See
+  # calculate_distance_to_type_by_sample() and run_ripple().
+  sample_ids_all <- cell_data[[sample_column]]
+  check_coordinate_frames(coords, sample_ids_all,
+    target_mask = query_mask, warn = TRUE
+  )
+
   cell_data[, dist_to_query := pmin(
-    as.vector(nn_query$nn.dists),
+    .dist_by_sample_quiet(coords, sample_ids_all, query_mask, k = 1),
     max_distance_um
   )]
 
@@ -1634,12 +1748,18 @@ run_ripple_confounder <- function(
     )
   }
 
-  control_coords <- coords[control_mask, , drop = FALSE]
-  nn_control <- RANN::nn2(control_coords, coords, k = 1)
+  # Partitioned by sample, as for the query distance above.
   cell_data[, dist_to_control := pmin(
-    as.vector(nn_control$nn.dists),
+    .dist_by_sample_quiet(coords, sample_ids_all, control_mask, k = 1),
     max_distance_um
   )]
+
+  # A sample missing either the query or the control cell type yields NA for
+  # that distance, which the bivariate GLM and the collinearity diagnostic
+  # cannot use. Drop those cells here, as run_ripple() does. Note control_mask
+  # is still aligned to the pre-drop rows, so the counts below are taken before
+  # subsetting and the mask is not reused afterwards.
+  n_no_dist <- cell_data[is.na(dist_to_query) | is.na(dist_to_control), .N]
 
   # Per-sample control cell counts
   control_per_sample <- cell_data[control_mask == TRUE, .N,
@@ -1647,30 +1767,22 @@ run_ripple_confounder <- function(
   ]
   data.table::setnames(control_per_sample, "N", "n_control")
 
-  # Collinearity check. High correlation between distance-to-query and
-  # distance-to-control destabilises the bivariate GLM (inflated SEs, unstable
-  # coefficients), so collinear samples are collected and warned about once.
-  .msg("\nCollinearity Diagnostics:", verbose = verbose)
-  samples_all <- unique(cell_data[[sample_column]])
-  collinear_samples <- character(0)
-  for (samp in samples_all) {
-    samp_data <- cell_data[get(sample_column) == samp]
-    cor_val <- stats::cor(samp_data$dist_to_query, samp_data$dist_to_control,
-      use = "complete.obs", method = "pearson"
+  # control_mask is no longer needed, so the NA-distance cells counted above
+  # can be dropped now.
+  if (n_no_dist > 0) {
+    warning(
+      n_no_dist, " cell(s) are in a sample missing either ", query_celltype,
+      " or ", control_celltype, " cells, so one of the two distances is ",
+      "undefined. They are excluded from the analysis.",
+      call. = FALSE
     )
-    is_collinear <- !is.na(cor_val) && abs(cor_val) > 0.8
-    if (is_collinear) {
-      collinear_samples[as.character(samp)] <- round(cor_val, 3)
+    cell_data <- cell_data[!is.na(dist_to_query) & !is.na(dist_to_control)]
+    if (nrow(cell_data) == 0) {
+      stop("No cells remain after dropping samples that lack the query or ",
+        "control cell type.",
+        call. = FALSE
+      )
     }
-    flag <- if (is_collinear) " [WARNING: high collinearity]" else ""
-    .msg("  ", samp, ": r = ", round(cor_val, 3), flag, verbose = verbose)
-  }
-  if (length(collinear_samples) > 0) {
-    warning("High collinearity (|r| > 0.8) between distance-to-query and ",
-      "distance-to-control in ", length(collinear_samples), " sample(s): ",
-      paste0(names(collinear_samples), " (r=", collinear_samples, ")",
-        collapse = ", "),
-      ". Stage 4 coefficients for these samples are unstable.", call. = FALSE)
   }
 
   # --------------------------------------------------------------------------
@@ -1735,6 +1847,30 @@ run_ripple_confounder <- function(
     count_matrix_ct <- count_matrix_full[, target_barcodes, drop = FALSE]
     total_counts_target <- Matrix::colSums(count_matrix_ct)
 
+    # Assess correlation on each target population's usable cells, rather
+    # than pooling query, control and unrelated cell types into the check.
+    collinear_samples <- character(0)
+    for (samp in valid_samples) {
+      idx <- which(target_valid[[sample_column]] == samp &
+                     is.finite(total_counts_target) & total_counts_target > 0)
+      dq <- target_valid$dist_to_query[idx]
+      dc <- target_valid$dist_to_control[idx]
+      if (length(idx) > 1 && stats::sd(dq) > 0 && stats::sd(dc) > 0) {
+        cor_val <- stats::cor(dq, dc)
+        if (is.finite(cor_val) && abs(cor_val) > 0.8) {
+          collinear_samples[as.character(samp)] <- round(cor_val, 3)
+        }
+      }
+    }
+    if (length(collinear_samples) > 0) {
+      warning("High collinearity (|r| > 0.8) for target '", ct_name,
+        "' between query and control distances: ",
+        paste0(names(collinear_samples), " (r=", collinear_samples, ")",
+               collapse = ", "),
+        ". Estimable coefficients may be unstable; rank-deficient fits are excluded.",
+        call. = FALSE)
+    }
+
     sig_genes <- intersect(sig_genes, rownames(count_matrix_ct))
     if (length(sig_genes) == 0) {
       .msg("  No genes available", verbose = verbose)
@@ -1766,24 +1902,25 @@ run_ripple_confounder <- function(
         samp_dist_control <- target_valid[samp_idx]$dist_to_control
         samp_total <- total_counts_target[target_barcodes[samp_idx]]
 
-        fit_result <- fit_poisson_controlled(
+        fit_check <- .fit_poisson_controlled_result(
           samp_counts, samp_dist_query, samp_dist_control, samp_total,
           min_cells = min_expr_cells_glm
         )
+        fit_result <- fit_check$fit
 
         if (is.null(fit_result)) {
           data.table::data.table(
             gene = g, sample_id = samp,
             coef = NA_real_, se = NA_real_,
-            n_cells = length(samp_idx), pval = NA_real_,
-            dispersion = NA_real_
+            n_cells = fit_check$n_cells, pval = NA_real_,
+            dispersion = NA_real_, fit_status = fit_check$fit_status
           )
         } else {
           data.table::data.table(
             gene = g, sample_id = samp,
             coef = fit_result$beta, se = fit_result$se,
             n_cells = fit_result$n_cells, pval = fit_result$pval,
-            dispersion = fit_result$dispersion
+            dispersion = fit_result$dispersion, fit_status = "ok"
           )
         }
       }))
@@ -1793,6 +1930,13 @@ run_ripple_confounder <- function(
       coef_results,
       file.path(ct_output_dir, "coef_per_sample.csv")
     )
+
+    n_rank_deficient <- sum(coef_results$fit_status == "rank_deficient", na.rm = TRUE)
+    if (n_rank_deficient > 0) {
+      warning(n_rank_deficient, " rank-deficient gene/sample fit(s) for target '",
+        ct_name, "' excluded: query and control distance effects cannot be ",
+        "estimated separately. See fit_status in coef_per_sample.csv.", call. = FALSE)
+    }
 
     # Fisher's combined p-value
     .msg("  Step 2: Combining with Fisher's method...", verbose = verbose)
@@ -1809,7 +1953,8 @@ run_ripple_confounder <- function(
         gene = g,
         stage2_median_coef = result$median_coef,
         stage2_fisher_pval = result$fisher_pval,
-        stage2_n_samples = result$n_valid
+        stage2_n_samples = result$n_valid,
+        stage2_n_rank_deficient = sum(gene_data$fit_status == "rank_deficient", na.rm = TRUE)
       )
     }), fill = TRUE)
 
@@ -2386,7 +2531,7 @@ merge_ripple_results <- function(
 #'   directly as `results_dir` to `\link{ripple_plot_qc}()` and the
 #'   other functions that expect a full RIPPLE results tree.
 #'
-#' @seealso [merge_ripple_results()], [ripple_plot_qc()]. The
+#' @seealso \code{\link{merge_ripple_results}}, \code{\link{ripple_plot_qc}}. The
 #'   `parallelization` vignette (`vignette("parallelization")`) shows
 #'   the full fan-out and consolidation pattern.
 #'

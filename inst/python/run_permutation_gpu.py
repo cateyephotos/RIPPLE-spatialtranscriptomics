@@ -7,6 +7,8 @@ Replaces the CPU-bound permutation step of the distance correlation R scripts
 with GPU-accelerated kNN using PyTorch CUDA tensors.
 
 Supports both v1 (logistic) and v2 (Poisson GLM with cell size offset).
+This legacy script samples pseudo-query cells from the full cell pool.
+It does not implement the package R API's non-target permutation default.
 Model selection is automatic based on ANALYSIS_NAME:
   - v1 (default): binary logistic regression on expression detection
   - v2 (ANALYSIS_NAME contains "v2"): Poisson GLM on raw counts with offset
@@ -379,9 +381,9 @@ def run_permutation_test_gpu(
 
     For each permutation:
     1. Sample pseudo-query cells (stratified by sample) on CPU
-    2. Compute kNN distances on GPU (the bottleneck that's now fast)
+    2. Compute kNN distances on GPU, WITHIN each sample (never pooled)
     3. Fit per-sample regression on CPU (logistic or Poisson)
-    4. Combine via inverse-variance weighting
+    4. Combine as the equal-weight median, matching median_coef in R
 
     Args:
         gene_data: Binary expressing (v1) or raw counts (v2) for target cells
@@ -402,31 +404,49 @@ def run_permutation_test_gpu(
     target_coords_cpu = target_coords_gpu.cpu().numpy()
 
     for i in range(n_perms):
-        # 1. Stratified sampling of pseudo-query cells
-        pseudo_query_list = []
+        # 1. + 2. Draw pseudo-query cells AND search WITHIN each sample.
+        #
+        # Drawing per sample but then concatenating the draws for one pooled
+        # kNN over all target cells is stratified in COUNT but not in SPACE.
+        # Tissue sections routinely share a coordinate frame, so that pooled
+        # search returns pseudo-query cells from other samples: the null then
+        # carries the same defect as a pooled observed statistic and the
+        # p-value looks plausible either way, so the permutation cannot detect
+        # the very bug it would need to. This mirrors run_permutation_test()
+        # in R/permutation.R; the two must stay in step.
+        perm_distances_cpu = np.full(len(sample_ids_target), np.nan)
+        n_pseudo_total = 0
+
         for samp in unique_samples:
             samp_indices = sample_masks_all[samp]
             n_to_sample = query_per_sample[samp]
-            if n_to_sample > 0 and len(samp_indices) >= n_to_sample:
-                chosen = rng.choice(samp_indices, size=n_to_sample, replace=False)
-                pseudo_query_list.append(chosen)
+            if n_to_sample <= 0 or len(samp_indices) < n_to_sample:
+                continue
 
-        if len(pseudo_query_list) == 0:
-            continue
-        pseudo_query_idx = np.concatenate(pseudo_query_list)
-        if len(pseudo_query_idx) < 5:
-            continue
+            chosen = rng.choice(samp_indices, size=n_to_sample, replace=False)
+            n_pseudo_total += len(chosen)
 
-        # 2. GPU kNN: distances from target cells to pseudo-query cells
-        pseudo_query_coords = all_coords_gpu[pseudo_query_idx]
-        perm_distances = gpu_knn_distances(pseudo_query_coords, target_coords_gpu,
-                                           k=k_neighbors)
-        perm_distances = torch.clamp(perm_distances, max=MAX_DISTANCE_UM)
-        perm_distances_cpu = perm_distances.cpu().numpy()
+            # Only this sample's target cells search only this sample's draws.
+            tgt_idx = sample_masks_target[samp]
+            if len(tgt_idx) == 0:
+                continue
+
+            eff_k = min(k_neighbors, len(chosen))
+            d_s = gpu_knn_distances(
+                all_coords_gpu[chosen],
+                target_coords_gpu[tgt_idx],
+                k=eff_k,
+            )
+            d_s = torch.clamp(d_s, max=MAX_DISTANCE_UM)
+            perm_distances_cpu[tgt_idx] = d_s.cpu().numpy()
+
+        if n_pseudo_total < 5:
+            continue
 
         # 3. Per-sample regression
+        # Only coefs is collected: the standard errors are used as a validity
+        # gate below but no longer weight the null statistic.
         coefs = []
-        ses = []
         for samp in unique_samples:
             idx = sample_masks_target[samp]
             if len(idx) < MIN_CELLS_PER_SAMPLE:
@@ -447,14 +467,16 @@ def run_permutation_test_gpu(
 
             if np.isfinite(c) and np.isfinite(s) and s > 0:
                 coefs.append(c)
-                ses.append(s)
 
-        # 4. Inverse-variance weighted mean
+        # 4. Null statistic: the equal-weight MEDIAN of the per-sample
+        # coefficients. This must match the observed statistic it is compared
+        # against, which is median_coef from compute_fisher_pval(), and it
+        # matches stats::median(coefs[valid]) in run_permutation_test(). An
+        # inverse-variance weighted mean here would build the null from a
+        # different estimator than the observed value, so |null| >= |observed|
+        # would not be comparing like with like.
         if len(coefs) >= 2:
-            coefs = np.array(coefs)
-            ses = np.array(ses)
-            weights = 1.0 / (ses ** 2)
-            null_coefs[i] = np.sum(weights * coefs) / np.sum(weights)
+            null_coefs[i] = np.median(np.array(coefs))
 
     # Empirical two-sided p-value
     valid_null = null_coefs[np.isfinite(null_coefs)]

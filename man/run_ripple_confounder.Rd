@@ -69,7 +69,8 @@ the analysis directory name).}
 \item{min_control_cells}{Minimum control cells per sample for reliable
 distance calculation (default: \code{30}).}
 
-\item{max_distance_um}{Maximum distance in micrometers (default: \code{200}).}
+\item{max_distance_um}{Distance cap in micrometers (default: \code{200})
+for both query and control predictors. Farther cells remain in the model.}
 
 \item{sig_column}{Which column from Stage 1 results to use for selecting
 significant genes. Typically \code{"fisher_fdr"} (default) or
@@ -94,6 +95,11 @@ classification for each gene, including columns: \code{gene},
 \code{cell_type}, \code{stage1_coef}, \code{stage2_median_coef},
 \code{stage2_fisher_fdr}, \code{classification},
 \code{control_celltype}.
+Per-sample output includes \code{fit_status}; \code{rank_deficient}
+means the query and control effects cannot be estimated separately.
+Such fits have missing coefficients and p-values and are excluded from
+aggregation. The comparison reports \code{stage2_n_rank_deficient}; genes
+with fewer than two valid fits receive \code{no_stage2_result}.
 }
 \description{
 Validates Stage 1 results by adding distance to a control cell type as a
@@ -113,14 +119,21 @@ niche effect.
 
 \describe{
 \item{query_specific}{Fisher FDR < threshold in Stage 4, same sign as
-Stage 1. The gradient persists after controlling for the niche.}
-\item{enhanced}{query_specific AND absolute coefficient is > 1.1x
-Stage 1 value. The control was suppressing the signal.}
-\item{niche_driven}{FDR >= threshold AND coefficient attenuated > 50\\%.
-The gradient was explained by the shared niche.}
-\item{underpowered}{FDR >= threshold AND coefficient preserved >= 50\\%.
-Likely a power issue from SE inflation, not a true niche effect.}
+Stage 1, without more than 10 percent growth in absolute coefficient.}
+\item{enhanced}{FDR < threshold, same sign as Stage 1, and absolute
+coefficient greater than 1.1 times the Stage 1 value.}
+\item{niche_driven}{FDR >= threshold AND absolute coefficient attenuated
+by more than 50 percent.}
+\item{underpowered}{FDR >= threshold AND at least 50 percent of the
+absolute coefficient retained.}
+\item{reversed}{FDR < threshold with a sign opposite to Stage 1.}
+\item{no_stage2_result}{No combined Stage 4 result, including cases with
+fewer than two valid fits after excluding rank-deficient predictors.}
+\item{unclassified}{Fallback when the available values do not satisfy
+any classification rule.}
 }
+These classifications describe coefficient changes and are
+hypothesis-generating, rather than a causal decomposition.
 }
 
 \examples{
