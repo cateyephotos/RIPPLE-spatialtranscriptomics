@@ -38,12 +38,12 @@ For each gene in each target cell type, RIPPLE fits a per-sample Poisson GLM wit
 
 ## Installation
 
-It is recommended you install these packages because `SpatialExperiment` is needed even for the quick start below. Install the Bioconductor
-packages first so the object loads and the vignettes build:
+Install the required `BiocNeighbors` dependency and the Bioconductor packages
+used by the quick start and vignettes:
 ```r
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install(c(
-  "SpatialExperiment", "SingleCellExperiment", "SummarizedExperiment",
+  "BiocNeighbors", "SpatialExperiment", "SingleCellExperiment", "SummarizedExperiment",
   "S4Vectors", "fgsea", "msigdbr"
 ))
 install.packages(c("R.utils", "knitr", "rmarkdown"))

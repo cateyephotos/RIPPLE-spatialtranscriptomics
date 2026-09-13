@@ -207,11 +207,9 @@ build_knn_graph <- function(coords, k = 20, sample_ids) {
 #'   \code{coords}. Cells with no neighbour in range, and cells with an
 #'   \code{NA} sample label, get \code{integer(0)}.
 #'
-#' @details Uses \code{RANN::nn2} for an initial broad kNN search, then filters
-#'   to only neighbors within the specified radius. The estimated k for the
-#'   initial search is based on cell density computed WITHIN each sample, since
-#'   a density taken over stacked sections is not the density of any real
-#'   tissue.
+#' @details Uses \code{\link[BiocNeighbors]{findNeighbors}} with an exact
+#'   Euclidean search within each sample. All neighbors within the radius are
+#'   returned, excluding the cell itself.
 #'
 #' @examples
 #' \dontrun{
@@ -220,7 +218,6 @@ build_knn_graph <- function(coords, k = 20, sample_ids) {
 #'                                 sample_ids = rep("s1", 100))
 #' }
 #'
-#' @importFrom RANN nn2
 #' @export
 build_radius_graph <- function(coords, radius, sample_ids) {
   if (missing(sample_ids)) {
@@ -252,19 +249,12 @@ build_radius_graph <- function(coords, radius, sample_ids) {
     if (length(rows) < 2) next
     sc <- coords[rows, , drop = FALSE]
 
-    # Density within this sample, not across stacked sections.
-    span <- diff(range(sc[, 1])) * diff(range(sc[, 2]))
-    k_est <- if (is.finite(span) && span > 0) {
-      min(ceiling((length(rows) / span) * pi * radius^2 * 2), length(rows) - 1L)
-    } else {
-      length(rows) - 1L
-    }
-    k_est <- max(as.integer(k_est), 1L)
-
-    nn <- RANN::nn2(sc, sc, k = k_est + 1L)
+    nn <- BiocNeighbors::findNeighbors(
+      sc, threshold = radius, get.distance = FALSE,
+      BNPARAM = BiocNeighbors::KmknnParam(distance = "Euclidean")
+    )
     for (j in seq_along(rows)) {
-      within <- nn$nn.dists[j, ] <= radius & nn$nn.dists[j, ] > 0
-      neighbors[[rows[j]]] <- rows[nn$nn.idx[j, within]]
+      neighbors[[rows[j]]] <- rows[nn$index[[j]]]
     }
   }
 

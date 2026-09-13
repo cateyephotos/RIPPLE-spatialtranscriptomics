@@ -37,6 +37,7 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(patchwork)
   library(RANN)  # For fast nearest neighbor search
+  library(BiocNeighbors)  # For complete radius neighborhoods
   library(Matrix)
   library(scales)
   library(rstatix)  # For tidy statistical tests (matches IMC pipeline)
@@ -414,9 +415,7 @@ build_radius_graph <- function(coords, radius, sample_ids) {
          length(sample_ids), " for ", nrow(coords), " rows).", call. = FALSE)
   }
 
-  # Partitioned by sample, and the density estimate is taken WITHIN each
-  # sample: a density computed over stacked sections is not the density of any
-  # real tissue.
+  # Search each sample independently and return all neighbors in range.
   n <- nrow(coords)
   samples <- unique(sample_ids[!is.na(sample_ids)])
   message(sprintf("Building radius neighbor graph (r=%s) in %d sample(s)...",
@@ -427,17 +426,12 @@ build_radius_graph <- function(coords, radius, sample_ids) {
     rows <- which(!is.na(sample_ids) & sample_ids == s)
     if (length(rows) < 2) next
     sc <- coords[rows, , drop = FALSE]
-    span <- diff(range(sc[, 1])) * diff(range(sc[, 2]))
-    k_est <- if (is.finite(span) && span > 0) {
-      min(ceiling((length(rows) / span) * pi * radius^2 * 2), length(rows) - 1L)
-    } else {
-      length(rows) - 1L
-    }
-    k_est <- max(as.integer(k_est), 1L)
-    nn <- nn2(sc, sc, k = k_est + 1L)
+    nn <- BiocNeighbors::findNeighbors(
+      sc, threshold = radius, get.distance = FALSE,
+      BNPARAM = BiocNeighbors::KmknnParam(distance = "Euclidean")
+    )
     for (j2 in seq_along(rows)) {
-      within <- nn$nn.dists[j2, ] <= radius & nn$nn.dists[j2, ] > 0
-      neighbors[[rows[j2]]] <- rows[nn$nn.idx[j2, within]]
+      neighbors[[rows[j2]]] <- rows[nn$index[[j2]]]
     }
   }
   neighbors

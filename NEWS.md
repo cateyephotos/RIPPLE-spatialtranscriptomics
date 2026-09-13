@@ -1,5 +1,7 @@
 # ripple (development version)
 
+* Return complete radius neighborhoods using BiocNeighbors, now a required
+  dependency.
 * Calculate distances and spatial neighbors within each biological sample.
   Add `calculate_distance_to_type_by_sample()` and `check_coordinate_frames()`.
 * Retain zero-valued Wald p-values in replicate aggregation and sign checking.

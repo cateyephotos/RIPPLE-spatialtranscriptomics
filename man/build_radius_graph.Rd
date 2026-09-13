@@ -26,11 +26,9 @@ Constructs a neighbor graph where cells are connected if they are within
 a specified radius.
 }
 \details{
-Uses \code{RANN::nn2} for an initial broad kNN search, then filters
-to only neighbors within the specified radius. The estimated k for the
-initial search is based on cell density computed WITHIN each sample, since
-a density taken over stacked sections is not the density of any real
-tissue.
+Uses \code{\link[BiocNeighbors]{findNeighbors}} with an exact
+Euclidean search within each sample. All neighbors within the radius are
+returned, excluding the cell itself.
 }
 \examples{
 \dontrun{
