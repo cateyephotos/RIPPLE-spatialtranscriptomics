@@ -1,3 +1,24 @@
+# ripple 0.2.0
+
+* Fixed the zero pvalue bug. Now retains zero-valued Wald p-values in aggregation.
+* Return complete radius neighborhoods using BiocNeighbors, now a required
+  dependency.
+* Fixed spatial diagnostics analysis distance settings.
+* Now reports confounder fits without confidence as such.
+* Exclude target cells from the default query-location permutation pool.
+  Direct calls to `run_permutation_test()` or `run_permutation_tests()` require
+  `target_mask_all`; `permutation_pool = "all"` preserves the previous pool.
+  The GPU script also defaults to non-target cells;
+  `--permutation-pool all` selects its previous null. Standalone R analysis
+  scripts retain the full pool.
+* Update synthetic benchmarks with matched-expression recovery and runtime
+  results.
+* Refresh the CosMx vignette and bundled gradient, pathway and ligand-receptor
+  results. Include cached distance diagnostics.
+* Calculate distances and spatial neighbors within each biological sample.
+  Add `calculate_distance_to_type_by_sample()` and `check_coordinate_frames()`.
+* Fixed bug on multi-slide experiments.
+
 # ripple 0.1.0
 
 Initial release of the RIPPLE package, accompanying the preprint. Version

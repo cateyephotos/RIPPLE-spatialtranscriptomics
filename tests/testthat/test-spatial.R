@@ -23,7 +23,8 @@ test_that("get_coord_columns errors on missing columns", {
 
 test_that("build_knn_graph returns correct structure", {
   coords <- matrix(runif(200), ncol = 2)
-  result <- build_knn_graph(coords, k = 5)
+  # sample_ids is required; single-sample intent is stated explicitly.
+  result <- build_knn_graph(coords, k = 5, sample_ids = rep("s1", 100))
   expect_equal(ncol(result$indices), 5)
   expect_equal(nrow(result$indices), 100)
 })
@@ -32,7 +33,8 @@ test_that("calculate_distance_to_type computes distances", {
   coords <- matrix(c(0, 0, 1, 0, 2, 0, 10, 10), ncol = 2, byrow = TRUE)
   cell_types <- c("A", "B", "A", "B")
 
-  dists <- calculate_distance_to_type(coords, cell_types, "B")
+  dists <- calculate_distance_to_type(coords, cell_types, "B",
+                                      sample_ids = rep("s1", 4))
 
   # Cell 1 (A at 0,0): nearest B is at (1,0), dist = 1
   expect_equal(dists[1], 1.0)
@@ -46,7 +48,8 @@ test_that("calculate_distance_to_type is NA-safe for unannotated cells", {
   coords <- matrix(c(0, 0, 10, 0, 5, 0, 100, 0), ncol = 2, byrow = TRUE)
   cell_types <- c("A", "B", NA, "B")
 
-  dists <- calculate_distance_to_type(coords, cell_types, "B")
+  dists <- calculate_distance_to_type(coords, cell_types, "B",
+                                      sample_ids = rep("s1", 4))
 
   expect_false(anyNA(dists))
   expect_equal(dists[1], 10) # (0,0) -> nearest B at (10,0)

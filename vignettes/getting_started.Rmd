@@ -38,13 +38,13 @@ distance to a query cell type, in the same direction in every replicate.
 
 ## Install and load
 
-The bundled `ripple_mock_data` is a `SpatialExperiment`, so its Bioconductor
-dependencies must be present before loading the package or this vignette.
+Install `BiocNeighbors`, required by RIPPLE, and the Bioconductor dependencies
+for the bundled `SpatialExperiment` example.
 
 ```{r install, eval = FALSE}
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install(c(
-  "SpatialExperiment", "SingleCellExperiment", "SummarizedExperiment", "S4Vectors"
+  "BiocNeighbors", "SpatialExperiment", "SingleCellExperiment", "SummarizedExperiment", "S4Vectors"
 ))
 install.packages("R.utils") # for ripple_plot_qc() to read the .gz QC table
 
@@ -99,7 +99,7 @@ types (everything except the query), fits a per-sample Poisson GLM with
 cell-size offset, and combines across replicates via Fisher's combined
 p-value with sign-consistency gating.
 
-```{r run-ripple, message = FALSE, warning = FALSE}
+```{r run-ripple, message = FALSE}
 out_dir <- file.path(tempdir(), "ripple_quickstart")
 unlink(out_dir, recursive = TRUE)
 dir.create(out_dir)
@@ -123,6 +123,51 @@ list.files(results_dir, recursive = TRUE)
 `run_ripple()` returns a `data.table` of results. It also writes an
 output directory with per-cell-type CSVs, QC tables, and the per-cell
 distance file that `ripple_plot_qc()` reads.
+
+### About that warning
+
+The run above warns that all three sample pairs have overlapping
+coordinate bounding boxes, and that 54.7% of cells have their nearest
+`Tumor` cell in a *different* sample. That is not a problem with your
+data or with this result, and it is worth understanding because it is
+the normal case rather than the exception.
+
+Each tissue section is imaged in its own coordinate frame, so its
+coordinates start near zero regardless of where the section physically
+sat. Stack several sections into one object, as every multi-sample
+analysis does, and they land on top of each other. A nearest-neighbour
+search run over the pooled coordinates then returns the nearest query
+cell from *any* section, and no amount of per-sample averaging
+afterwards repairs it, because the damage happens before the averaging.
+
+RIPPLE partitions every distance search by `sample_column`, so a cell
+can only ever be matched to a cell from its own section. That is why
+the warning says the results are unaffected: they are byte-identical
+whether the sections overlap, are pushed into disjoint space, or are
+stacked exactly on top of one another. The warning exists because the
+same coordinates will silently mislead anything that pools, which
+includes most other spatial tools and any hand-rolled kNN, so it is
+worth knowing about your own data.
+
+The measured numbers are written to `qc/coordinate_frames.csv` on every
+run, and `check_coordinate_frames()` will report them for any dataset:
+
+```{r frame-check}
+frames <- check_coordinate_frames(
+  coords      = SpatialExperiment::spatialCoords(ripple_mock_data),
+  sample_ids  = ripple_mock_data$sample_id,
+  target_mask = ripple_mock_data$cell_type == "Tumor",
+  warn        = FALSE
+)
+str(frames)
+```
+
+`cross_sample_fraction` is the one to read. It is the share of cells
+whose nearest target cell falls in another sample, so it says how much
+the overlap would actually cost a pooled analysis. The bounding-box
+`ratio` is weaker than it looks: above 1 it proves the sections
+overlap, but below 1 it proves nothing, because sections tiled with
+gaps can hide a pair sitting perfectly on top of each other.
 
 ### One query vs one target cell type
 
@@ -273,8 +318,8 @@ To make pathway enrichment ignore `broad`-class genes, pass
 `exclude_broad = TRUE` to `run_ripple_fgsea()`. Read the "Limitations
 of the broad-class filter" section in `?run_ripple_fgsea` first. Run
 with and without the filter before reporting. The
-[CosMx walkthrough](cosmx_nsclc_walkthrough.html) shows a side-by-side
-comparison.
+[CosMx walkthrough](cosmx_nsclc_walkthrough.html) shows the filtered
+results and code for comparing both settings.
 
 > **Note on the broad-class dials.** `classify_gene_specificity()`
 > has two. `broad_threshold` sets how many cell types a gene must hit
@@ -356,11 +401,14 @@ the specificity check, the QC dashboard. The stages below are
 
 - **Confounder control**, `run_ripple_confounder()`. Use when a second
   cell type shares the query's niche. Refits with distance to that
-  control cell type added. Tells you whether a gradient is specific to
-  the query or just reflects the shared neighbourhood.
+  control cell type added. Describes how the gradient changes after
+  adjustment; indistinguishable predictors are flagged and excluded.
 - **Permutation testing**, `run_permutation_tests()` (or set
   `n_permutations` in `run_ripple()`). Builds an empirical null for
-  query specificity. A GPU script is available for large datasets.
+  query-location specificity using non-target pseudo-query cells.
+  `permutation_pool = "all"` retains the previous full-cell pool. The GPU
+  script also defaults to non-target candidates (`--permutation-pool all`
+  selects its previous pool). Direct R calls require `target_mask_all`.
 - **Pathway enrichment**, `run_ripple_fgsea()`. Summarises gradient
   genes as enriched pathways instead of a gene list.
 - **Ligand-receptor integration**, `run_ripple_lr()`. Maps gradient

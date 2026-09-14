@@ -338,7 +338,9 @@ test_that("downstream stages chain off a single run_ripple run", {
   dir.create(out_dir)
   on.exit(unlink(out_dir, recursive = TRUE))
 
-  stage1 <- run_ripple(
+  # Coordinate-frame overlap is incidental here; see
+  # helper-frame-warning.R.
+  stage1 <- without_frame_warning(run_ripple(
     input                = ripple_mock_data,
     query_celltype       = "Tumor",
     celltype_column      = "cell_type",
@@ -348,7 +350,7 @@ test_that("downstream stages chain off a single run_ripple run", {
     min_expr_pct         = 0,
     min_expr_floor       = 10,
     verbose              = FALSE
-  )
+  ))
   results_dir <- file.path(out_dir, "ripple")
   expect_true(dir.exists(results_dir))
   expect_true(file.exists(file.path(
@@ -384,7 +386,9 @@ test_that("downstream stages chain off a single run_ripple run", {
   expect_true(!any(planted$specificity_class == "broad"))
 
   # --- run_ripple_confounder with Fibroblast as control ---
-  stage2 <- suppressMessages(run_ripple_confounder(
+  # Coordinate-frame overlap is incidental here; see
+  # helper-frame-warning.R.
+  stage2 <- without_frame_warning(suppressMessages(run_ripple_confounder(
     input            = ripple_mock_data,
     results_dir      = results_dir,
     query_celltype   = "Tumor",
@@ -395,7 +399,7 @@ test_that("downstream stages chain off a single run_ripple run", {
     min_cells_per_sample = 30,
     min_control_cells = 20,
     verbose          = FALSE
-  ))
+  )))
   expect_s3_class(stage2, "data.table")
   expect_true("gene" %in% names(stage2))
   # Stage 2 writes to "<results_dir>_stage2" by default

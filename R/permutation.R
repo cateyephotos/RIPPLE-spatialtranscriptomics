@@ -7,6 +7,38 @@
 #' @name permutation
 NULL
 
+# Select candidates by cell identity, not coordinate equality: distinct cells
+# can legitimately share coordinates. The mask includes every cell of the
+# target population, including target cells not retained for gene fitting.
+.prepare_permutation_pool <- function(coords_all, sample_ids_all,
+                                      query_per_sample, target_mask_all,
+                                      permutation_pool) {
+  if (length(sample_ids_all) != nrow(coords_all)) {
+    stop("sample_ids_all must align with coords_all.", call. = FALSE)
+  }
+  if (permutation_pool == "non_target") {
+    if (!is.logical(target_mask_all) ||
+        length(target_mask_all) != nrow(coords_all) || anyNA(target_mask_all)) {
+      stop("For permutation_pool = 'non_target', supply target_mask_all as a ",
+        "logical vector marking all target-population cells in coords_all. ",
+        "Use permutation_pool = 'all' to reproduce the previous full-pool null.",
+        call. = FALSE)
+    }
+    keep <- !target_mask_all
+    coords_all <- coords_all[keep, , drop = FALSE]
+    sample_ids_all <- sample_ids_all[keep]
+    for (samp in names(query_per_sample)) {
+      required <- query_per_sample[[samp]]
+      if (is.finite(required) && required > 0 &&
+          sum(sample_ids_all == samp, na.rm = TRUE) < required) {
+        stop("Too few non-target candidates in sample '", samp,
+          "' to preserve its query count (", required, ").", call. = FALSE)
+      }
+    }
+  }
+  list(coords = coords_all, sample_ids = sample_ids_all)
+}
+
 #' Single-gene permutation test
 #'
 #' Validates a distance-expression gradient by shuffling query cell labels
@@ -31,24 +63,35 @@ NULL
 #'   calculation (default: 1).
 #' @param total_counts Numeric vector (length n_target). Total counts per
 #'   target cell (for Poisson offset).
-#' @param max_distance Numeric. Maximum distance to consider in um
-#'   (default: 200).
+#' @param max_distance Numeric. Distance cap in um (default: 200).
+#'   Farther target cells remain in the fit at this distance.
 #' @param min_cells_per_sample Integer. Minimum target cells per sample
 #'   (default: 30).
 #' @param min_expr_cells Integer. Minimum expressing cells for GLM fit
 #'   (default: 5).
+#' @param permutation_pool Candidate population for pseudo-query cells:
+#'   \code{"non_target"} (default) excludes the target population, keeping
+#'   query and target roles distinct; \code{"all"} reproduces the previous
+#'   full-cell-pool sampling, including target cells.
+#' @param target_mask_all Logical vector aligned with \code{coords_all}, marking
+#'   every cell of the target population. Required for \code{"non_target"}.
+#'   Exclusion uses cell identity, not coordinate matching.
 #'
 #' @return A list with:
 #' \describe{
 #'   \item{\code{null_coefs}}{Numeric vector of null distribution coefficients.}
 #'   \item{\code{perm_pval}}{Numeric. Two-sided empirical p-value.}
+#'   \item{\code{permutation_pool}}{Candidate population used.}
 #' }
 #'
 #' @details For each permutation:
 #' \enumerate{
 #'   \item Randomly sample pseudo-query cells WITHIN each sample (stratified),
-#'     preserving the original query cell count per sample.
-#'   \item Compute distances from all target cells to the nearest pseudo-query cell.
+#'     preserving the original query cell count per sample. By default, target
+#'     cells are excluded from the candidate pool. The observed target cells,
+#'     query-neighbor count and distance cap stay fixed.
+#'   \item Compute within-sample distances to the nearest pseudo-query cell,
+#'     or the mean of the \code{k_neighbors} nearest cells, then cap distances.
 #'   \item Fit per-sample Poisson GLMs and take the median of per-sample
 #'     coefficients -- the same statistic as the observed \code{median_coef},
 #'     so the empirical p-value compares like with like.
@@ -56,18 +99,30 @@ NULL
 #'
 #' The empirical p-value is calculated as:
 #'   \code{(sum(|null| >= |observed|) + 1) / (n_valid_perms + 1)}
+#' The default null compares the observed query locations with random locations
+#' among non-target cells. It does not test specificity against a particular
+#' alternative cell type. Too few non-target candidates raises an error rather
+#' than changing the query count or falling back to the full pool.
+#' Fisher combination and the sign gate are not applied to permutations.
+#' The GPU script also defaults to non-target candidates; use its
+#' \code{--permutation-pool all} option for the previous full-cell pool.
+#' Standalone R analysis scripts retain the legacy full-cell pool.
 #'
 #' @examples
 #' \dontrun{
+#' all_xy <- matrix(runif(2000, 0, 500), ncol = 2)
+#' all_samples <- rep(c("s1", "s2"), each = 500)
+#' target_mask <- rep(c(rep(TRUE, 50), rep(FALSE, 450)), 2)
 #' result <- run_permutation_test(
 #'   counts = rpois(100, 5),
-#'   coords_target = matrix(runif(200), ncol = 2),
-#'   coords_all = matrix(runif(2000), ncol = 2),
-#'   sample_ids = rep(c("s1", "s2"), each = 50),
+#'   coords_target = all_xy[target_mask, ],
+#'   coords_all = all_xy,
+#'   sample_ids = all_samples[target_mask],
 #'   n_perms = 100,
 #'   observed_coef = -0.005,
-#'   sample_ids_all = rep(c("s1", "s2"), each = 500),
+#'   sample_ids_all = all_samples,
 #'   query_per_sample = c(s1 = 50, s2 = 60),
+#'   target_mask_all = target_mask,
 #'   k_neighbors = 1,
 #'   total_counts = rpois(100, 5000)
 #' )
@@ -83,42 +138,65 @@ run_permutation_test <- function(counts, coords_target, coords_all,
                                  total_counts,
                                  max_distance = 200,
                                  min_cells_per_sample = 30,
-                                 min_expr_cells = 5) {
+                                 min_expr_cells = 5,
+                                 permutation_pool = c("non_target", "all"),
+                                 target_mask_all = NULL) {
+  permutation_pool <- match.arg(permutation_pool)
+  pool <- .prepare_permutation_pool(coords_all, sample_ids_all, query_per_sample,
+                                    target_mask_all, permutation_pool)
+  coords_all <- pool$coords
+  sample_ids_all <- pool$sample_ids
   null_coefs <- numeric(n_perms)
   unique_samples <- names(query_per_sample)
 
   for (i in seq_len(n_perms)) {
-    # STRATIFIED SAMPLING: Sample pseudo-query cells WITHIN each sample
-    pseudo_query_coords_list <- lapply(unique_samples, function(samp) {
-      samp_mask <- sample_ids_all == samp
-      samp_coords <- coords_all[samp_mask, , drop = FALSE]
+    # STRATIFIED SAMPLING: draw pseudo-query cells WITHIN each sample, AND
+    # search within each sample.
+    #
+    # Drawing per sample but then rbind-ing the draws and running one pooled
+    # RANN::nn2 over all target cells is stratified in COUNT but not in SPACE.
+    # Because sections routinely share a coordinate frame, that pooled search
+    # returns pseudo-query cells from other samples, so the null carries the
+    # same defect as a pooled observed statistic and perm_pval comes out
+    # plausible either way. The permutation then cannot detect the very bug it
+    # would need to. Both the draw and the search must be per sample.
+    perm_distances <- rep(NA_real_, nrow(coords_target))
+    n_pseudo_total <- 0L
+
+    for (samp in unique_samples) {
       n_to_sample <- query_per_sample[samp]
+      if (is.na(n_to_sample) || n_to_sample <= 0) next
 
-      if (n_to_sample > 0 && nrow(samp_coords) >= n_to_sample) {
-        pseudo_idx <- sample(nrow(samp_coords), n_to_sample)
-        samp_coords[pseudo_idx, , drop = FALSE]
+      samp_coords <- coords_all[sample_ids_all == samp, , drop = FALSE]
+      if (nrow(samp_coords) < n_to_sample) next
+
+      pseudo <- samp_coords[sample(nrow(samp_coords), n_to_sample), ,
+        drop = FALSE
+      ]
+      n_pseudo_total <- n_pseudo_total + nrow(pseudo)
+
+      # Only this sample's target cells search only this sample's pseudo-query
+      tgt_idx <- which(sample_ids == samp)
+      if (!length(tgt_idx)) next
+
+      eff_k <- min(k_neighbors, nrow(pseudo))
+      nn_s <- RANN::nn2(pseudo, coords_target[tgt_idx, , drop = FALSE],
+        k = eff_k
+      )
+      d_s <- if (eff_k == 1) {
+        as.vector(nn_s$nn.dists)
       } else {
-        matrix(nrow = 0, ncol = 2)
+        rowMeans(nn_s$nn.dists)
       }
-    })
+      perm_distances[tgt_idx] <- pmin(d_s, max_distance)
+    }
 
-    pseudo_query_coords <- do.call(rbind, pseudo_query_coords_list)
-
-    if (nrow(pseudo_query_coords) < 5) {
+    if (n_pseudo_total < 5) {
       null_coefs[i] <- NA
       next
     }
 
-    # Calculate distances to pseudo-query cells
-    effective_k <- min(k_neighbors, nrow(pseudo_query_coords))
-    nn_result <- RANN::nn2(pseudo_query_coords, coords_target, k = effective_k)
-    if (effective_k == 1) {
-      perm_distances <- pmin(as.vector(nn_result$nn.dists), max_distance)
-    } else {
-      perm_distances <- pmin(rowMeans(nn_result$nn.dists), max_distance)
-    }
-
-    # Calculate Poisson coefficients per sample using inverse-variance weighting
+    # Calculate Poisson coefficients per sample for the equal-weight median.
     coefs <- numeric(length(unique_samples))
     ses <- numeric(length(unique_samples))
 
@@ -155,7 +233,11 @@ run_permutation_test <- function(counts, coords_target, coords_all,
 
     # Null statistic must match the observed statistic (median_coef, the
     # equal-weight median of per-sample coefficients from compute_fisher_pval).
-    # ses > 0 identifies samples whose GLM actually converged.
+    # ses > 0 identifies samples whose GLM actually converged. It also covers a
+    # sample skipped by the draw loop above: its perm_distances stay NA, the
+    # glm() call fails, tryCatch returns NULL, and coefs/ses stay at their zero
+    # initial value, so the sample is excluded here rather than contributing a
+    # spurious zero coefficient.
     valid <- !is.na(coefs) & !is.na(ses) & ses > 0
     if (sum(valid) >= 2) {
       null_coefs[i] <- stats::median(coefs[valid])
@@ -170,12 +252,14 @@ run_permutation_test <- function(counts, coords_target, coords_all,
     warning("Only ", length(null_coefs), " of ", n_perms, " permutations ",
       "produced a valid null coefficient (need >= 10); returning NA. This ",
       "usually means too few samples reach min_cells_per_sample.", call. = FALSE)
-    return(list(null_coefs = null_coefs, perm_pval = NA_real_))
+    return(list(null_coefs = null_coefs, perm_pval = NA_real_,
+                permutation_pool = permutation_pool))
   }
 
   perm_pval <- (sum(abs(null_coefs) >= abs(observed_coef)) + 1) / (length(null_coefs) + 1)
 
-  list(null_coefs = null_coefs, perm_pval = perm_pval)
+  list(null_coefs = null_coefs, perm_pval = perm_pval,
+       permutation_pool = permutation_pool)
 }
 
 
@@ -201,14 +285,17 @@ run_permutation_test <- function(counts, coords_target, coords_all,
 #' @param n_perms Integer. Number of permutations per gene.
 #' @param k_neighbors Integer. Number of nearest neighbors for distance
 #'   calculation.
-#' @param max_distance_um Numeric. Maximum distance in micrometers.
+#' @param max_distance_um Numeric. Distance cap in micrometers; farther target
+#'   cells remain in the fit at this distance.
 #' @param min_cells_per_sample Integer. Minimum target cells per sample for
 #'   GLM fitting.
 #' @param min_expr_cells Integer. Minimum expressing cells for GLM fitting.
 #' @param total_counts_target Numeric vector. Total UMI counts per target cell
 #'   (for Poisson offset).
+#' @inheritParams run_permutation_test
 #'
-#' @return A \code{data.table} with columns \code{gene} and \code{perm_pval}.
+#' @return A \code{data.table} with columns \code{gene}, \code{perm_pval},
+#'   and \code{permutation_pool}.
 #'
 #' @examples
 #' \dontrun{
@@ -221,6 +308,7 @@ run_permutation_test <- function(counts, coords_target, coords_all,
 #'   sample_ids_target = target_samples,
 #'   sample_ids_all = all_samples,
 #'   query_per_sample = c(s1 = 50, s2 = 60),
+#'   target_mask_all = all_celltypes == "T_cell", # aligned with all_xy
 #'   observed_coefs = c(Cxcl12 = -0.005, Ccl21a = -0.003),
 #'   n_perms = 500,
 #'   k_neighbors = 1,
@@ -241,7 +329,14 @@ run_permutation_tests <- function(genes, count_matrix, target_barcodes,
                                   query_per_sample, observed_coefs,
                                   n_perms, k_neighbors, max_distance_um,
                                   min_cells_per_sample, min_expr_cells,
-                                  total_counts_target) {
+                                  total_counts_target,
+                                  permutation_pool = c("non_target", "all"),
+                                  target_mask_all = NULL) {
+  permutation_pool <- match.arg(permutation_pool)
+  pool <- .prepare_permutation_pool(coords_all, sample_ids_all, query_per_sample,
+                                    target_mask_all, permutation_pool)
+  coords_all <- pool$coords
+  sample_ids_all <- pool$sample_ids
   unique_samples <- names(query_per_sample)
 
   results <- lapply(genes, function(g) {
@@ -250,31 +345,42 @@ run_permutation_tests <- function(genes, count_matrix, target_barcodes,
 
     null_coefs <- numeric(n_perms)
     for (i in seq_len(n_perms)) {
-      # Stratified sampling within each sample
-      pseudo_query_coords_list <- lapply(unique_samples, function(samp) {
-        samp_mask <- sample_ids_all == samp
-        samp_coords <- coords_all[samp_mask, , drop = FALSE]
-        n_to_sample <- query_per_sample[samp]
-        if (n_to_sample > 0 && nrow(samp_coords) >= n_to_sample) {
-          pseudo_idx <- sample(nrow(samp_coords), n_to_sample)
-          samp_coords[pseudo_idx, , drop = FALSE]
-        } else {
-          matrix(nrow = 0, ncol = 2)
-        }
-      })
-      pseudo_query_coords <- do.call(rbind, pseudo_query_coords_list)
+      # Stratified draw AND stratified search. See run_permutation_test() for
+      # why pooling the rbind-ed draws defeats the test: the null inherits the
+      # same cross-sample defect as a pooled observed statistic.
+      perm_distances <- rep(NA_real_, nrow(coords_target))
+      n_pseudo_total <- 0L
 
-      if (is.null(pseudo_query_coords) || nrow(pseudo_query_coords) < 5) {
-        null_coefs[i] <- NA
-        next
+      for (samp in unique_samples) {
+        n_to_sample <- query_per_sample[samp]
+        if (is.na(n_to_sample) || n_to_sample <= 0) next
+
+        samp_coords <- coords_all[sample_ids_all == samp, , drop = FALSE]
+        if (nrow(samp_coords) < n_to_sample) next
+
+        pseudo <- samp_coords[sample(nrow(samp_coords), n_to_sample), ,
+          drop = FALSE
+        ]
+        n_pseudo_total <- n_pseudo_total + nrow(pseudo)
+
+        tgt_idx <- which(sample_ids_target == samp)
+        if (!length(tgt_idx)) next
+
+        eff_k <- min(k_neighbors, nrow(pseudo))
+        nn_res <- RANN::nn2(pseudo, coords_target[tgt_idx, , drop = FALSE],
+          k = eff_k
+        )
+        d_s <- if (eff_k == 1) {
+          as.vector(nn_res$nn.dists)
+        } else {
+          rowMeans(nn_res$nn.dists)
+        }
+        perm_distances[tgt_idx] <- pmin(d_s, max_distance_um)
       }
 
-      eff_k <- min(k_neighbors, nrow(pseudo_query_coords))
-      nn_res <- RANN::nn2(pseudo_query_coords, coords_target, k = eff_k)
-      if (eff_k == 1) {
-        perm_distances <- pmin(as.vector(nn_res$nn.dists), max_distance_um)
-      } else {
-        perm_distances <- pmin(rowMeans(nn_res$nn.dists), max_distance_um)
+      if (n_pseudo_total < 5) {
+        null_coefs[i] <- NA
+        next
       }
 
       coefs <- numeric(length(unique_samples))
@@ -325,7 +431,8 @@ run_permutation_tests <- function(genes, count_matrix, target_barcodes,
         (length(null_coefs) + 1)
     }
 
-    data.table::data.table(gene = g, perm_pval = perm_pval)
+    data.table::data.table(gene = g, perm_pval = perm_pval,
+                          permutation_pool = permutation_pool)
   })
 
   out <- data.table::rbindlist(results)
@@ -356,6 +463,8 @@ run_permutation_tests <- function(genes, count_matrix, target_barcodes,
 #'   \item Reads \code{permutation_pvals.csv} (GPU output with gene and perm_pval columns).
 #'   \item Reads \code{meta_analysis_results.csv} (existing R output).
 #'   \item Replaces any existing \code{perm_pval} column with GPU results.
+#'   \item Replaces the recorded \code{permutation_pool} with the imported
+#'     value, or \code{"unspecified"} if the imported file does not record it.
 #'   \item Overwrites \code{meta_analysis_results.csv} with updated data.
 #' }
 #'
@@ -408,11 +517,19 @@ merge_permutation_results <- function(results_dir) {
       next
     }
 
+    # Imported p-values must not retain the previous run's pool label.
+    if (!"permutation_pool" %in% names(perm)) {
+      perm[, permutation_pool := "unspecified"]
+    }
+    if ("permutation_pool" %in% names(meta)) {
+      meta[, permutation_pool := NULL]
+    }
     # Remove old perm_pval column and merge new one
     if ("perm_pval" %in% names(meta)) {
       meta[, perm_pval := NULL]
     }
-    meta <- merge(meta, perm[, .(gene, perm_pval)], by = "gene", all.x = TRUE)
+    meta <- merge(meta, perm[, .(gene, perm_pval, permutation_pool)],
+                  by = "gene", all.x = TRUE)
     data.table::setDT(meta)
 
     # Summary stats

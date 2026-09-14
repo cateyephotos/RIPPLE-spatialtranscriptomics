@@ -37,6 +37,7 @@ test_that("run_permutation_test null is unbiased and drives the empirical p-valu
     sample_ids_all   = sample_ids_all,
     query_per_sample = query_per_sample,
     k_neighbors      = 1,
+    permutation_pool = "all",
     total_counts     = target$total,
     max_distance     = 200,
     min_cells_per_sample = 30,
@@ -62,6 +63,7 @@ test_that("run_permutation_test null is unbiased and drives the empirical p-valu
     coords_all = coords_all, sample_ids = target$sample, n_perms = 50,
     observed_coef = -10, sample_ids_all = sample_ids_all,
     query_per_sample = query_per_sample, k_neighbors = 1,
+    permutation_pool = "all",
     total_counts = target$total, max_distance = 200,
     min_cells_per_sample = 30, min_expr_cells = 5
   )
@@ -77,7 +79,9 @@ test_that("run_ripple permutation testing populates valid empirical p-values", {
   dir.create(out_dir)
   on.exit(unlink(out_dir, recursive = TRUE), add = TRUE)
 
-  results <- run_ripple(
+  # Coordinate-frame overlap is incidental here; see
+  # helper-frame-warning.R.
+  results <- without_frame_warning(run_ripple(
     input                = ripple_mock_data,
     query_celltype       = "Tumor",
     celltype_column      = "cell_type",
@@ -88,7 +92,7 @@ test_that("run_ripple permutation testing populates valid empirical p-values", {
     min_expr_floor       = 10,
     n_permutations       = 199,
     verbose              = FALSE
-  )
+  ))
 
   expect_true("perm_pval" %in% names(results))
   pv <- results$perm_pval
@@ -97,4 +101,25 @@ test_that("run_ripple permutation testing populates valid empirical p-values", {
   expect_true(all(finite_pv >= 0 & finite_pv <= 1))
   # Minimum achievable p-value with 199 perms is 1/200.
   expect_true(all(finite_pv >= 1 / 200))
+  expect_true(all(results$permutation_pool[!is.na(results$perm_pval)] == "non_target"))
+
+  # The optional null changes; the observed fits and Fisher/BH results do not.
+  legacy_dir <- tempfile("ripple_perm_legacy_")
+  dir.create(legacy_dir)
+  on.exit(unlink(legacy_dir, recursive = TRUE), add = TRUE)
+  legacy <- without_frame_warning(run_ripple(
+    input = ripple_mock_data, query_celltype = "Tumor",
+    celltype_column = "cell_type", sample_column = "sample_id",
+    output_dir = legacy_dir, min_cells_per_sample = 30,
+    min_expr_pct = 0, min_expr_floor = 10, n_permutations = 19,
+    permutation_pool = "all", verbose = FALSE
+  ))
+  keys <- c("cell_type", "gene")
+  cols <- c(keys, "median_coef", "fisher_pval", "fisher_fdr")
+  current_fit <- data.table::copy(results)[, ..cols]
+  old_fit <- data.table::copy(legacy)[, ..cols]
+  data.table::setorderv(current_fit, keys)
+  data.table::setorderv(old_fit, keys)
+  expect_equal(as.data.frame(current_fit), as.data.frame(old_fit))
+  expect_true(all(legacy$permutation_pool[!is.na(legacy$perm_pval)] == "all"))
 })

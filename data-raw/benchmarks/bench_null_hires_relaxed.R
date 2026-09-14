@@ -1,0 +1,138 @@
+# ============================================================================
+# High-resolution FDR null calibration -- relaxed sign-consistency gate (0.75)
+# ============================================================================
+# Mirrors bench_null_hires.R exactly, but runs RIPPLE with
+# sign_consistency = 0.75 instead of the strict 1.0 default. Used by
+# Fig 2 Panel E to characterize the gate-relaxation tradeoff.
+#
+# Design: 50 iter x 3 N (3, 5, 10) x 500 background genes = 75,000 null
+# tests per N.
+#
+# Run with:
+#   Rscript data-raw/benchmarks/bench_null_hires_relaxed.R
+#
+# Output:
+#   data-raw/benchmarks/results/bench_null_hires_relaxed_results.rds
+#   inst/extdata/bench_null_hires_relaxed_results.rds
+# ============================================================================
+
+suppressPackageStartupMessages({
+  library(data.table)
+  devtools::load_all(quiet = TRUE)
+})
+source("data-raw/benchmarks/benchmark_helpers.R")
+
+n_iterations <- 50
+sample_sizes <- c(3, 5, 10)
+n_background <- 500
+base_seed <- 2026
+sign_thresh <- 0.75
+
+cat("=== FDR Null Calibration Benchmark (HIRES, gate=0.75) ===\n")
+cat(sprintf(
+  "  %d iterations x %d sample sizes = %d runs\n",
+  n_iterations, length(sample_sizes),
+  n_iterations * length(sample_sizes)
+))
+cat(sprintf("  %d background genes/run = %d total null tests per N\n",
+            n_background, n_iterations * n_background))
+cat(sprintf("  sign_consistency threshold = %.2f\n", sign_thresh))
+
+all_results <- list()
+counter <- 0
+total_runs <- n_iterations * length(sample_sizes)
+t_start <- Sys.time()
+
+for (n_samp in sample_sizes) {
+  for (iter in seq_len(n_iterations)) {
+    counter <- counter + 1
+    seed <- base_seed * 1000 + n_samp * 100 + iter
+
+    if (counter %% 5 == 1 || counter == total_runs) {
+      elapsed <- as.numeric(difftime(Sys.time(), t_start, units = "secs"))
+      rate <- counter / max(elapsed, 1)
+      eta <- (total_runs - counter) / max(rate, 1e-6)
+      cat(sprintf(
+        "[%d/%d] N=%d iter=%d  elapsed=%.1fm  eta=%.1fm\n",
+        counter, total_runs, n_samp, iter,
+        elapsed / 60, eta / 60
+      ))
+    }
+
+    spe <- generate_benchmark_data(
+      n_samples      = n_samp,
+      n_gradient_neg = 0,
+      n_gradient_pos = 0,
+      n_background   = n_background,
+      seed           = seed
+    )
+
+    res <- tryCatch(
+      run_ripple_quiet(spe, sign_consistency = sign_thresh),
+      error = function(e) {
+        warning(sprintf("N=%d iter=%d failed: %s", n_samp, iter, e$message))
+        NULL
+      }
+    )
+
+    if (!is.null(res)) {
+      tcell_res <- res[cell_type == "T_cell"]
+      n_tested <- nrow(tcell_res)
+      n_sig_fdr <- sum(tcell_res$fisher_fdr < 0.05, na.rm = TRUE)
+      n_sig_pval <- sum(tcell_res$fisher_pval < 0.05, na.rm = TRUE)
+
+      all_results[[counter]] <- data.table(
+        n_samples = n_samp,
+        iteration = iter,
+        seed = seed,
+        n_genes_tested = n_tested,
+        n_sig_fdr = n_sig_fdr,
+        n_sig_pval = n_sig_pval,
+        empirical_fdr = n_sig_fdr / max(n_tested, 1),
+        empirical_fwer = as.integer(n_sig_fdr > 0)
+      )
+    }
+  }
+}
+
+results_dt <- rbindlist(all_results)
+
+cat("\n=== Results (gate=0.75) ===\n")
+summary_dt <- results_dt[, .(
+  n_runs = .N,
+  mean_genes_tested = mean(n_genes_tested),
+  mean_fdr = mean(empirical_fdr),
+  sd_fdr = sd(empirical_fdr),
+  max_fdr = max(empirical_fdr),
+  mean_fwer = mean(empirical_fwer),
+  total_sig_fdr = sum(n_sig_fdr),
+  total_sig_pval = sum(n_sig_pval),
+  total_tested = sum(n_genes_tested)
+), by = n_samples]
+
+summary_dt[, pooled_fdr := total_sig_fdr / total_tested]
+summary_dt[, pooled_pval_rate := total_sig_pval / total_tested]
+print(summary_dt)
+
+# Set RIPPLE_BENCH_DIR to choose a separate output directory.
+bench_dir <- Sys.getenv("RIPPLE_BENCH_DIR",
+                        unset = "data-raw/benchmarks/results")
+dir.create(bench_dir, recursive = TRUE, showWarnings = FALSE)
+out_path <- file.path(bench_dir, "bench_null_hires_relaxed_results.rds")
+saveRDS(list(per_run = results_dt, summary = summary_dt), file = out_path)
+cat("\nSaved:", out_path, "\n")
+
+# Refresh the package copy only for a DEFAULT run. A revision run sets
+# RIPPLE_BENCH_DIR and must not touch the cache the submitted figures and
+# vignette numbers were built from: that cache is the baseline the
+# regenerated numbers get compared against.
+extdata_path <- "inst/extdata/bench_null_hires_relaxed_results.rds"
+if (!nzchar(Sys.getenv("RIPPLE_BENCH_DIR"))) {
+  file.copy(out_path, extdata_path, overwrite = TRUE)
+  cat("Copied to:", extdata_path, "\n")
+} else {
+  cat("RIPPLE_BENCH_DIR is set; leaving", extdata_path, "untouched\n")
+}
+
+elapsed_total <- as.numeric(difftime(Sys.time(), t_start, units = "mins"))
+cat(sprintf("\nTotal wall-clock: %.1f min\n", elapsed_total))

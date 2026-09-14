@@ -30,20 +30,21 @@ This page walks through how RIPPLE works, with diagrams you can interact with!
 
 > *"Which genes in cell type B change expression as a function of physical distance from cell type A, reproducibly across biological replicates?"*
 
-For each gene in each target cell type, RIPPLE fits a per-sample Poisson GLM with Euclidean distance to the nearest query cell as the predictor and `log(total_counts)` as an offset. Per-sample coefficients are then combined across biological replicates via Fisher's combined p-value with a sign-consistency gate. The output is a ranked list of genes with signed gradient scores, calibrated FDR, and per-sample reproducibility.
+For each gene in each target cell type, RIPPLE fits a per-sample Poisson GLM with distance to the query population as the predictor and `log(total_counts)` as an offset. Per-sample p-values are combined across biological replicates via Fisher's method with a sign-consistency gate. The output is a ranked list of genes with signed gradient scores, BH-adjusted p-values, and per-sample reproducibility summaries.
 
 **Supported platforms:** Xenium, CosMx, MERFISH, etc. Suited to any imaging-based platform with single-cell resolved coordinates and integer counts. Not designed for spot-resolution platforms (e.g. Visium without deconvolution) where one spot mixes multiple cell types.
 
 ---
+**Note**: For users of v0.1.0, there are important updates and bug fixes in v0.2.0, so we recommend updating!
 
 ## Installation
 
-It is recommended you install these packages because `SpatialExperiment` is needed even for the quick start below. Install the Bioconductor
-packages first so the object loads and the vignettes build:
+Install the required `BiocNeighbors` dependency and the Bioconductor packages
+used by the quick start and vignettes:
 ```r
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install(c(
-  "SpatialExperiment", "SingleCellExperiment", "SummarizedExperiment",
+  "BiocNeighbors", "SpatialExperiment", "SingleCellExperiment", "SummarizedExperiment",
   "S4Vectors", "fgsea", "msigdbr"
 ))
 install.packages(c("R.utils", "knitr", "rmarkdown"))
@@ -109,7 +110,7 @@ Four vignettes ship with the package:
 | Vignette | Description |
 |----------|-------------|
 | `getting_started` | 5-minute end-to-end run on the bundled synthetic dataset. The fastest way to see what RIPPLE does. |
-| `cosmx_nsclc_walkthrough` | Applied walkthrough on the public CosMx NSCLC dataset (He et al., 2022), reproducing paper Figure 3 panel by panel. Loads cached results from `inst/extdata/`, so the vignette renders without re-running the full pipeline. |
+| `cosmx_nsclc_walkthrough` | Applied walkthrough on public CosMx NSCLC data (He et al., 2022), using refreshed bundled gradient, pathway and ligand-receptor results. |
 | `parallelization` | How to fan out `run_ripple()` over cell types on a multi-core machine using `future.apply`. For large datasets where a single-core run would take hours. |
 | `benchmarks` | FDR calibration, power curves, and runtime measurements from the synthetic benchmark suite. |
 
@@ -130,7 +131,7 @@ Each stage is optional except Stage 1.
 |-------|-------------|---------|
 | 1. Distance correlation | `run_ripple()` | Per-sample Poisson GLM + Fisher combined p-value with sign-consistency gate |
 | 2. Merge and summarize | `merge_ripple_results()`, `compute_fisher_pval()` | Combines per-celltype results, recomputes Fisher p-values. IF you run_ripple(), you will get these out too, but you can use these functions if your run gets interrupted, for ex. |
-| 3. Permutation validation | `run_permutation_tests()` (R) or `inst/python/run_permutation_gpu.py` (GPU) | Validates query specificity via label permutation. Warning: running without GPU is very slow, you may only want to do it later for genes of interest. |
+| 3. Permutation validation | `run_ripple(n_permutations = ...)` or `run_permutation_tests()` | Tests query-location specificity of the median coefficient using non-target pseudo-query candidates. The GPU script uses the same candidate pool by default. |
 | 4. Confounder control | `run_ripple_confounder()` | Bivariate GLM isolating query-specific from shared-niche effects |
 | 5. Atlas figures | `run_ripple_atlas()`, `run_ripple_fgsea()`, `plot_gradient_volcano()`, `plot_gradient_curve()` | Multi-panel figures, pathway enrichment, contamination flagging |
 | 6. Ligand-receptor integration | `run_ripple_lr()`, `classify_lr_artifacts()` | Matches gradient genes to L-R pairs via NicheNet |
@@ -153,11 +154,24 @@ For each gene in each target cell type, per biological replicate:
 glm(counts ~ distance_to_query + offset(log(total_counts)), family = poisson)
 ```
 
-- `distance_to_query`: Euclidean distance (um) to the nearest query cell (default k = 1)
-- `offset(log(total_counts))`: cell-size correction converts raw counts to rates, controls for ambient RNA and segmentation differences that co-vary with cell size
+- `distance_to_query`: within-sample Euclidean distance (um) to the nearest query cell at `k_neighbors = 1`, or mean distance to the k nearest query cells. Distances are capped at `max_distance_um` (default 200); farther cells remain in the fit.
+- `offset(log(total_counts))`: accounts for differences in total measured counts per cell. It does not identify or remove ambient RNA or segmentation errors.
 - **Coefficient (beta)**: log-rate change per um. Negative = expression increases near query cells (induced). Positive = expression decreases (repressed).
 
-Per-sample coefficients are combined via Fisher's combined p-value. The sign-consistency gate requires all replicates to agree on the direction of the effect (`sign_consistency = 1.0` by default; relax to 0.75 for N >= 6). `fisher_fdr` is the primary significance metric for all downstream analyses.
+The gradient score is the median per-sample coefficient, with equal weight per replicate. Fisher's method combines per-sample p-values after the sign gate (default `sign_consistency = 1.0`); consider relaxation to 0.75 only with at least six replicates and report it explicitly. Zero p-values remain in sign checking and are floored at `1e-15` for Fisher combination. At least two valid samples are required. BH adjustment is applied separately within each target cell type, and `fisher_fdr` is the primary significance metric.
+
+Within-sample Wald p-values depend on the Poisson variance and cell-independence assumptions. Replicate aggregation does not correct violations of those assumptions; see the benchmarks vignette for pooled FPR and empirical FDR under overdispersion.
+
+### Updating existing workflows
+
+- GPU permutation tests read `median_coef` from package results. Legacy results
+  require the accompanying `coef_per_sample.csv` to reconstruct observed
+  medians. Poisson fits use `layers['counts']` when present, otherwise raw
+  counts in `.X`, for both expression and the library-size offset.
+
+- Optional R permutation tests now use `permutation_pool = "non_target"`. `run_ripple()` supplies cell identities automatically; direct calls to `run_permutation_test()` or `run_permutation_tests()` require `target_mask_all`, aligned with `coords_all`. Use `permutation_pool = "all"` for the previous full-cell-pool null. The GPU script also defaults to non-target candidates; select its previous pool with `--permutation-pool all` or `PERMUTATION_POOL=all`. GPU outputs record the pool, and imported results without a label are marked `"unspecified"`. Standalone R analysis scripts still use the full pool.
+- For `check_spatial_autocorrelation()`, pass the same input subset, `k_neighbors`, `max_distance_um`, and sample settings used for the main analysis. Its separate `k` argument controls the Moran neighbor graph. A small Moran's I does not establish independence.
+- Confounder fits with indistinguishable distance predictors are excluded and recorded as `fit_status = "rank_deficient"`. Check `stage2_n_rank_deficient`; fewer than two valid fits yields `no_stage2_result`.
 
 ---
 
@@ -168,7 +182,7 @@ Per-sample coefficients are combined via Fisher's combined p-value. The sign-con
 | Counts | Raw integer counts in `assays(spe, "counts")` for a `SpatialExperiment`, or `obj[["RNA"]]$counts` for Seurat. The Poisson model handles normalization internally via the offset. Pre-normalized data will produce incorrect results. |
 | Spatial coordinates | `spatialCoords()` for `SpatialExperiment`, or X/Y columns in cell metadata for Seurat/SCE. Common column names (`x_centroid`/`y_centroid`, `spatial_x`/`spatial_y`, `x`/`y`) are auto-detected; override via `x_column` / `y_column`. |
 | Cell types | Metadata column named by `celltype_column`, containing the query population. |
-| Replicate ID | Metadata column named by `sample_column` (default `"sample_id"`). Minimum 3 biological replicates; 4+ recommended. |
+| Replicate ID | Metadata column named by `sample_column` (default `"sample_id"`). Combination requires at least two valid samples per gene; use more biological replicates where possible. |
 | Condition (optional) | Metadata column named by `condition_column`, with the target value in `condition_value`. |
 
 ---
@@ -264,5 +278,3 @@ If you use RIPPLE, please cite the preprint:
 
 A machine-readable bibentry ships in `inst/CITATION` and can be
 retrieved with `citation("ripple")`.
-
-

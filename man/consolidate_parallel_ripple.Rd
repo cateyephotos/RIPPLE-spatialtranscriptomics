@@ -79,7 +79,7 @@ ripple_plot_qc(final_dir, query_label = "endothelial")
 }
 }
 \seealso{
-\code{\link[=merge_ripple_results]{merge_ripple_results()}}, \code{\link[=ripple_plot_qc]{ripple_plot_qc()}}. The
+\code{\link{merge_ripple_results}}, \code{\link{ripple_plot_qc}}. The
 \code{parallelization} vignette (\code{vignette("parallelization")}) shows
 the full fan-out and consolidation pattern.
 }

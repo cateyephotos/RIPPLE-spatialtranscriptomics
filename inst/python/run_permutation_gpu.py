@@ -7,13 +7,19 @@ Replaces the CPU-bound permutation step of the distance correlation R scripts
 with GPU-accelerated kNN using PyTorch CUDA tensors.
 
 Supports both v1 (logistic) and v2 (Poisson GLM with cell size offset).
+Pseudo-query cells are sampled from non-target cells by default, matching
+the package R API. Use --permutation-pool all for the previous full-cell pool.
 Model selection is automatic based on ANALYSIS_NAME:
   - v1 (default): binary logistic regression on expression detection
   - v2 (ANALYSIS_NAME contains "v2"): Poisson GLM on raw counts with offset
 
 Reads:
   - h5ad file with expression, coordinates, metadata
-  - meta_analysis_results.csv from the R script (run with N_PERMUTATIONS=0)
+  - meta_analysis_results.csv with median_coef from the R package
+  - for legacy combined_coef results, coef_per_sample.csv to recover medians
+
+Poisson fits use layers['counts'] when present, otherwise raw counts in .X.
+The response and library-size offset always use the same count matrix.
 
 Writes:
   - permutation_pvals.csv per cell type (same format as R script)
@@ -359,6 +365,41 @@ def fit_poisson_sample(counts: np.ndarray, distances: np.ndarray,
 # Permutation Test (GPU-accelerated)
 # =============================================================================
 
+def prepare_permutation_pool(sample_ids_all, query_per_sample,
+                             target_mask_all=None, permutation_pool="non_target"):
+    """Return candidate row indices per sample, excluding targets by identity.
+
+    target_mask_all marks the entire target population in the full input,
+    including cells not retained for a particular gene's regression.
+    """
+    if permutation_pool not in ("non_target", "all"):
+        raise ValueError("permutation_pool must be 'non_target' or 'all'.")
+    sample_ids_all = np.asarray(sample_ids_all)
+    if sample_ids_all.ndim != 1:
+        raise ValueError("sample_ids_all must be a one-dimensional array.")
+    eligible = np.ones(len(sample_ids_all), dtype=bool)
+    if permutation_pool == "non_target":
+        mask = np.asarray(target_mask_all)
+        if (mask.dtype.kind != "b" or mask.ndim != 1
+                or len(mask) != len(sample_ids_all)):
+            raise ValueError(
+                "For permutation_pool='non_target', supply target_mask_all as a "
+                "boolean array marking every target-population cell in all_coords_gpu. "
+                "Use permutation_pool='all' for the previous full-cell pool."
+            )
+        eligible = ~mask
+    pools = {}
+    for sample, required in query_per_sample.items():
+        candidates = np.flatnonzero((sample_ids_all == sample) & eligible)
+        if permutation_pool == "non_target" and len(candidates) < required:
+            raise ValueError(
+                f"Too few non-target candidates in sample '{sample}' to preserve "
+                f"its query count ({required}); found {len(candidates)}."
+            )
+        pools[sample] = candidates
+    return pools
+
+
 def run_permutation_test_gpu(
     gene_data: np.ndarray,
     target_coords_gpu: torch.Tensor,
@@ -373,21 +414,26 @@ def run_permutation_test_gpu(
     k_neighbors: int = 1,
     use_poisson: bool = False,
     log_total_counts_target: np.ndarray = None,
+    permutation_pool: str = "non_target",
+    target_mask_all: np.ndarray = None,
 ) -> float:
     """
     GPU-accelerated permutation test for a single gene.
 
     For each permutation:
     1. Sample pseudo-query cells (stratified by sample) on CPU
-    2. Compute kNN distances on GPU (the bottleneck that's now fast)
+    2. Compute kNN distances on GPU, WITHIN each sample (never pooled)
     3. Fit per-sample regression on CPU (logistic or Poisson)
-    4. Combine via inverse-variance weighting
+    4. Combine as the equal-weight median, matching median_coef in R
 
     Args:
         gene_data: Binary expressing (v1) or raw counts (v2) for target cells
         use_poisson: If True, use Poisson GLM with offset instead of logistic
         log_total_counts_target: Required if use_poisson=True; log(total_counts)
         k_neighbors: Number of nearest neighbors for distance computation
+        permutation_pool: 'non_target' (default) or legacy 'all'
+        target_mask_all: Boolean mask of all target-population cells, aligned
+            with all_coords_gpu. Required for the default non-target pool.
 
     Returns empirical two-sided p-value.
     """
@@ -395,38 +441,57 @@ def run_permutation_test_gpu(
     null_coefs = np.empty(n_perms)
     null_coefs[:] = np.nan
 
-    # Pre-compute sample masks for all cells (for stratified sampling)
-    sample_masks_all = {s: np.where(sample_ids_all == s)[0] for s in unique_samples}
+    if len(sample_ids_all) != len(all_coords_gpu):
+        raise ValueError("sample_ids_all must align with all_coords_gpu.")
+    sample_masks_all = prepare_permutation_pool(
+        sample_ids_all, query_per_sample, target_mask_all, permutation_pool
+    )
     sample_masks_target = {s: np.where(sample_ids_target == s)[0] for s in unique_samples}
 
-    target_coords_cpu = target_coords_gpu.cpu().numpy()
-
     for i in range(n_perms):
-        # 1. Stratified sampling of pseudo-query cells
-        pseudo_query_list = []
+        # 1. + 2. Draw pseudo-query cells AND search WITHIN each sample.
+        #
+        # Drawing per sample but then concatenating the draws for one pooled
+        # kNN over all target cells is stratified in COUNT but not in SPACE.
+        # Tissue sections routinely share a coordinate frame, so that pooled
+        # search returns pseudo-query cells from other samples: the null then
+        # carries the same defect as a pooled observed statistic and the
+        # p-value looks plausible either way, so the permutation cannot detect
+        # the very bug it would need to. This mirrors run_permutation_test()
+        # in R/permutation.R; the two must stay in step.
+        perm_distances_cpu = np.full(len(sample_ids_target), np.nan)
+        n_pseudo_total = 0
+
         for samp in unique_samples:
             samp_indices = sample_masks_all[samp]
             n_to_sample = query_per_sample[samp]
-            if n_to_sample > 0 and len(samp_indices) >= n_to_sample:
-                chosen = rng.choice(samp_indices, size=n_to_sample, replace=False)
-                pseudo_query_list.append(chosen)
+            if n_to_sample <= 0 or len(samp_indices) < n_to_sample:
+                continue
 
-        if len(pseudo_query_list) == 0:
-            continue
-        pseudo_query_idx = np.concatenate(pseudo_query_list)
-        if len(pseudo_query_idx) < 5:
-            continue
+            chosen = rng.choice(samp_indices, size=n_to_sample, replace=False)
+            n_pseudo_total += len(chosen)
 
-        # 2. GPU kNN: distances from target cells to pseudo-query cells
-        pseudo_query_coords = all_coords_gpu[pseudo_query_idx]
-        perm_distances = gpu_knn_distances(pseudo_query_coords, target_coords_gpu,
-                                           k=k_neighbors)
-        perm_distances = torch.clamp(perm_distances, max=MAX_DISTANCE_UM)
-        perm_distances_cpu = perm_distances.cpu().numpy()
+            # Only this sample's target cells search only this sample's draws.
+            tgt_idx = sample_masks_target[samp]
+            if len(tgt_idx) == 0:
+                continue
+
+            eff_k = min(k_neighbors, len(chosen))
+            d_s = gpu_knn_distances(
+                all_coords_gpu[chosen],
+                target_coords_gpu[tgt_idx],
+                k=eff_k,
+            )
+            d_s = torch.clamp(d_s, max=MAX_DISTANCE_UM)
+            perm_distances_cpu[tgt_idx] = d_s.cpu().numpy()
+
+        if n_pseudo_total < 5:
+            continue
 
         # 3. Per-sample regression
+        # Only coefs is collected: the standard errors are used as a validity
+        # gate below but no longer weight the null statistic.
         coefs = []
-        ses = []
         for samp in unique_samples:
             idx = sample_masks_target[samp]
             if len(idx) < MIN_CELLS_PER_SAMPLE:
@@ -447,14 +512,16 @@ def run_permutation_test_gpu(
 
             if np.isfinite(c) and np.isfinite(s) and s > 0:
                 coefs.append(c)
-                ses.append(s)
 
-        # 4. Inverse-variance weighted mean
+        # 4. Null statistic: the equal-weight MEDIAN of the per-sample
+        # coefficients. This must match the observed statistic it is compared
+        # against, which is median_coef from compute_fisher_pval(), and it
+        # matches stats::median(coefs[valid]) in run_permutation_test(). An
+        # inverse-variance weighted mean here would build the null from a
+        # different estimator than the observed value, so |null| >= |observed|
+        # would not be comparing like with like.
         if len(coefs) >= 2:
-            coefs = np.array(coefs)
-            ses = np.array(ses)
-            weights = 1.0 / (ses ** 2)
-            null_coefs[i] = np.sum(weights * coefs) / np.sum(weights)
+            null_coefs[i] = np.median(np.array(coefs))
 
     # Empirical two-sided p-value
     valid_null = null_coefs[np.isfinite(null_coefs)]
@@ -470,6 +537,55 @@ def run_permutation_test_gpu(
 # Main
 # =============================================================================
 
+def load_observed_medians(meta_results, results_dir):
+    """Read package medians or recover them from legacy per-sample fits.
+
+    Legacy combined_coef is a weighted meta-analysis estimate, so it cannot
+    be compared with the median statistic used by the permutation null.
+    """
+    if "median_coef" in meta_results:
+        return pd.to_numeric(meta_results["median_coef"], errors="raise")
+
+    sample_file = Path(results_dir) / "coef_per_sample.csv"
+    if not sample_file.is_file():
+        raise ValueError(
+            "Permutation testing requires median_coef in meta_analysis_results.csv "
+            "or coef_per_sample.csv with gene, sample_id, coef and se columns. "
+            "Legacy combined_coef is not a median and cannot be used directly."
+        )
+    fits = pd.read_csv(sample_file)
+    required = {"gene", "sample_id", "coef", "se"}
+    if not required.issubset(fits.columns):
+        raise ValueError("coef_per_sample.csv requires gene, sample_id, coef and se columns.")
+    if fits[["gene", "sample_id"]].isna().any().any() or fits.duplicated(["gene", "sample_id"]).any():
+        raise ValueError("coef_per_sample.csv requires one row per gene and sample, with nonmissing IDs.")
+    valid = np.isfinite(fits["coef"]) & np.isfinite(fits["se"]) & (fits["se"] > 0)
+    summary = fits.loc[valid].groupby("gene")["coef"].agg(["median", "count"])
+    medians = summary["median"].where(summary["count"] >= 2)
+    print("Using observed medians reconstructed from coef_per_sample.csv.")
+    return meta_results["gene"].map(medians)
+
+
+def select_count_matrix(adata):
+    """Select and validate raw counts for both the Poisson response and offset."""
+    if "counts" in adata.layers:
+        matrix, source = adata.layers["counts"], "adata.layers['counts']"
+    else:
+        matrix, source = adata.X, "adata.X"
+    values = matrix.data if sparse.issparse(matrix) else np.asarray(matrix).reshape(-1)
+    # Check the full matrix in bounded chunks, without densifying sparse input.
+    for start in range(0, len(values), 1_000_000):
+        block = values[start:start + 1_000_000]
+        if (not np.all(np.isfinite(block)) or np.any(block < 0)
+                or not np.allclose(block, np.round(block), rtol=0, atol=1e-6)):
+            raise ValueError(
+                f"{source} must contain finite, nonnegative integer counts for "
+                "Poisson permutation testing. Supply raw counts in layers['counts'] "
+                "or, if that layer is absent, in .X."
+            )
+    return matrix, source
+
+
 def main():
     parser = argparse.ArgumentParser(description="GPU-accelerated permutation testing")
     parser.add_argument("--celltype", type=str, default=None,
@@ -480,7 +596,13 @@ def main():
                         help=f"Number of permutations (default: {N_PERMUTATIONS})")
     parser.add_argument("--adata-path", type=str, default=None,
                         help="Path to h5ad file")
+    parser.add_argument("--permutation-pool", choices=("non_target", "all"),
+                        default=os.environ.get("PERMUTATION_POOL", "non_target"),
+                        help="Pseudo-query candidates: non_target (default) or legacy all; "
+                             "also settable through PERMUTATION_POOL")
     args = parser.parse_args()
+    if args.permutation_pool not in ("non_target", "all"):
+        parser.error("PERMUTATION_POOL must be 'non_target' or 'all'.")
 
     # Resolve annotation level
     annotation_level = (args.annotation_level
@@ -545,6 +667,7 @@ def main():
     print(f"Target cell type: {celltype_name}")
     print(f"Cell type column: {celltype_col}")
     print(f"N permutations:   {n_perms}")
+    print(f"Permutation pool: {args.permutation_pool}")
     print(f"Results dir:      {ct_dir}")
 
     # Check GPU
@@ -564,11 +687,12 @@ def main():
 
     meta_results = pd.read_csv(meta_file)
     print(f"\nLoaded meta-analysis results: {len(meta_results)} genes")
+    meta_results["observed_median"] = load_observed_medians(meta_results, ct_dir)
 
     # Determine genes for permutation testing
     # Top N by absolute coefficient + priority genes (same logic as R script)
     top_by_effect = (meta_results
-                     .sort_values("combined_coef", key=abs, ascending=False)
+                     .sort_values("observed_median", key=abs, ascending=False)
                      .head(PERM_TOP_N)["gene"].tolist())
 
     # Load h5ad to get available genes
@@ -588,36 +712,13 @@ def main():
     print(f"  Permutation genes: {len(top_by_effect)} top by effect + "
           f"{len(priority_in_data)} priority = {len(perm_genes)} total")
 
-    # Compute total counts per cell (for Poisson offset) BEFORE filtering
+    # Select a single expression source BEFORE filtering cells or genes.
+    expression_matrix = adata.X
     if use_poisson:
+        expression_matrix, count_source = select_count_matrix(adata)
+        print(f"  Using {count_source} for the Poisson response and offset")
         print("\nComputing total counts per cell for Poisson offset...")
-        if sparse.issparse(adata.X):
-            total_counts_all = np.array(adata.X.sum(axis=1)).flatten()
-        else:
-            total_counts_all = np.array(adata.X.sum(axis=1)).flatten()
-
-        # Sanity check: .X should contain integer counts (not normalized)
-        if sparse.issparse(adata.X):
-            sample_vals = adata.X[:100].toarray().flatten()
-        else:
-            sample_vals = adata.X[:100].flatten()
-        non_zero = sample_vals[sample_vals > 0]
-        if len(non_zero) > 0 and not np.allclose(non_zero, np.round(non_zero)):
-            print("  WARNING: .X appears to contain non-integer values!")
-            print("  Checking for 'counts' layer...")
-            if "counts" in adata.layers:
-                print("  Using adata.layers['counts'] instead")
-                if sparse.issparse(adata.layers["counts"]):
-                    total_counts_all = np.array(
-                        adata.layers["counts"].sum(axis=1)
-                    ).flatten()
-                else:
-                    total_counts_all = np.array(
-                        adata.layers["counts"].sum(axis=1)
-                    ).flatten()
-            else:
-                print("  WARNING: No 'counts' layer found. Proceeding with .X")
-
+        total_counts_all = np.asarray(expression_matrix.sum(axis=1)).reshape(-1)
         log_total_counts_all = np.log(np.maximum(total_counts_all, 1.0))
         print(f"  Total counts range: {total_counts_all.min():.0f} - {total_counts_all.max():.0f}")
         print(f"  Median total counts: {np.median(total_counts_all):.0f}")
@@ -638,6 +739,7 @@ def main():
         cond_mask = np.ones(len(adata), dtype=bool)
 
     cond_indices_in_full = np.where(cond_mask)[0]
+    expression_matrix = expression_matrix[cond_indices_in_full]
     adata = adata[cond_mask].copy()
     print(f"  Cells after filtering: {adata.shape[0]}")
 
@@ -706,6 +808,12 @@ def main():
     if len(valid_samples) < 2:
         sys.exit("Need at least 2 valid samples for meta-analysis")
 
+    # Validate the pool before extracting counts or allocating GPU tensors.
+    query_per_sample_valid = {s: n for s, n in query_per_sample.items()
+                              if s in valid_samples}
+    prepare_permutation_pool(sample_ids, query_per_sample_valid, target_mask,
+                             args.permutation_pool)
+
     # Filter target to valid samples
     target_in_valid = target_mask & np.isin(sample_ids, list(valid_samples))
     target_indices = np.where(target_in_valid)[0]
@@ -718,11 +826,11 @@ def main():
                     if g in available_genes]
     perm_genes_available = [g for g in perm_genes if g in available_genes]
 
-    if sparse.issparse(adata.X):
-        expr_target = np.array(adata.X[target_indices][:, gene_indices].toarray(),
+    if sparse.issparse(expression_matrix):
+        expr_target = np.array(expression_matrix[target_indices][:, gene_indices].toarray(),
                                dtype=np.float32)
     else:
-        expr_target = np.array(adata.X[target_indices][:, gene_indices],
+        expr_target = np.array(expression_matrix[target_indices][:, gene_indices],
                                dtype=np.float32)
 
     print(f"  Expression matrix: {expr_target.shape}")
@@ -739,11 +847,7 @@ def main():
                                      device=device)
 
     # Get observed coefficients from meta-analysis
-    meta_dict = dict(zip(meta_results["gene"], meta_results["combined_coef"]))
-
-    # Filter query_per_sample to valid samples only
-    query_per_sample_valid = {s: n for s, n in query_per_sample.items()
-                              if s in valid_samples}
+    meta_dict = dict(zip(meta_results["gene"], meta_results["observed_median"]))
 
     # ==========================================================================
     # Run Permutation Tests
@@ -789,6 +893,8 @@ def main():
             use_poisson=use_poisson,
             log_total_counts_target=(log_total_counts_target if use_poisson
                                      else None),
+            permutation_pool=args.permutation_pool,
+            target_mask_all=target_mask,
         )
 
         results.append({"gene": gene, "perm_pval": perm_pval})
@@ -809,7 +915,8 @@ def main():
     # Save Results
     # ==========================================================================
 
-    results_df = pd.DataFrame(results)
+    results_df = pd.DataFrame(results, columns=["gene", "perm_pval"])
+    results_df["permutation_pool"] = args.permutation_pool
     output_path = ct_dir / "permutation_pvals.csv"
     results_df.to_csv(output_path, index=False)
     print(f"\nSaved: {output_path}")

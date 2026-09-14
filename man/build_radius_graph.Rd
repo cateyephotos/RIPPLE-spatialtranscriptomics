@@ -4,30 +4,37 @@
 \alias{build_radius_graph}
 \title{Build radius-based neighbor graph}
 \usage{
-build_radius_graph(coords, radius)
+build_radius_graph(coords, radius, sample_ids)
 }
 \arguments{
 \item{coords}{Numeric matrix of spatial coordinates (n x 2).}
 
 \item{radius}{Numeric. Search radius in coordinate units (typically microns).}
+
+\item{sample_ids}{Vector of length n giving the sample each cell belongs to.
+Required, and the graph is built within each sample separately, for the
+reasons given in \code{\link{build_knn_graph}}.}
 }
 \value{
 A list of length n, where each element is an integer vector of
-neighbor indices within the radius.
+neighbor indices within the radius, given as row numbers into
+\code{coords}. Cells with no neighbour in range, and cells with an
+\code{NA} sample label, get \code{integer(0)}.
 }
 \description{
 Constructs a neighbor graph where cells are connected if they are within
 a specified radius.
 }
 \details{
-Uses \code{RANN::nn2} for an initial broad kNN search, then filters
-to only neighbors within the specified radius. The estimated k for the
-initial search is based on average cell density.
+Uses \code{\link[BiocNeighbors]{findNeighbors}} with an exact
+Euclidean search within each sample. All neighbors within the radius are
+returned, excluding the cell itself.
 }
 \examples{
 \dontrun{
 coords <- matrix(runif(200), ncol = 2)
-neighbors <- build_radius_graph(coords, radius = 50)
+neighbors <- build_radius_graph(coords, radius = 50,
+                                sample_ids = rep("s1", 100))
 }
 
 }

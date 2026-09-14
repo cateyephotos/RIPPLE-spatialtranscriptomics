@@ -58,6 +58,7 @@ jobs:
             any::rmarkdown
             any::R.utils
             bioc::SpatialExperiment
+            bioc::BiocNeighbors
             bioc::SummarizedExperiment
             bioc::SingleCellExperiment
             bioc::S4Vectors

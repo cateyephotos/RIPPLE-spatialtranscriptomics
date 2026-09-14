@@ -17,7 +17,9 @@ run_permutation_test(
   total_counts,
   max_distance = 200,
   min_cells_per_sample = 30,
-  min_expr_cells = 5
+  min_expr_cells = 5,
+  permutation_pool = c("non_target", "all"),
+  target_mask_all = NULL
 )
 }
 \arguments{
@@ -49,20 +51,30 @@ calculation (default: 1).}
 \item{total_counts}{Numeric vector (length n_target). Total counts per
 target cell (for Poisson offset).}
 
-\item{max_distance}{Numeric. Maximum distance to consider in um
-(default: 200).}
+\item{max_distance}{Numeric. Distance cap in um (default: 200).
+Farther target cells remain in the fit at this distance.}
 
 \item{min_cells_per_sample}{Integer. Minimum target cells per sample
 (default: 30).}
 
 \item{min_expr_cells}{Integer. Minimum expressing cells for GLM fit
 (default: 5).}
+
+\item{permutation_pool}{Candidate population for pseudo-query cells:
+\code{"non_target"} (default) excludes the target population, keeping
+query and target roles distinct; \code{"all"} reproduces the previous
+full-cell-pool sampling, including target cells.}
+
+\item{target_mask_all}{Logical vector aligned with \code{coords_all}, marking
+every cell of the target population. Required for \code{"non_target"}.
+Exclusion uses cell identity, not coordinate matching.}
 }
 \value{
 A list with:
 \describe{
 \item{\code{null_coefs}}{Numeric vector of null distribution coefficients.}
 \item{\code{perm_pval}}{Numeric. Two-sided empirical p-value.}
+\item{\code{permutation_pool}}{Candidate population used.}
 }
 }
 \description{
@@ -74,8 +86,11 @@ Uses stratified sampling to preserve per-sample query cell counts.
 For each permutation:
 \enumerate{
 \item Randomly sample pseudo-query cells WITHIN each sample (stratified),
-preserving the original query cell count per sample.
-\item Compute distances from all target cells to the nearest pseudo-query cell.
+preserving the original query cell count per sample. By default, target
+cells are excluded from the candidate pool. The observed target cells,
+query-neighbor count and distance cap stay fixed.
+\item Compute within-sample distances to the nearest pseudo-query cell,
+or the mean of the \code{k_neighbors} nearest cells, then cap distances.
 \item Fit per-sample Poisson GLMs and take the median of per-sample
 coefficients -- the same statistic as the observed \code{median_coef},
 so the empirical p-value compares like with like.
@@ -83,18 +98,30 @@ so the empirical p-value compares like with like.
 
 The empirical p-value is calculated as:
 \code{(sum(|null| >= |observed|) + 1) / (n_valid_perms + 1)}
+The default null compares the observed query locations with random locations
+among non-target cells. It does not test specificity against a particular
+alternative cell type. Too few non-target candidates raises an error rather
+than changing the query count or falling back to the full pool.
+Fisher combination and the sign gate are not applied to permutations.
+The GPU script also defaults to non-target candidates; use its
+\code{--permutation-pool all} option for the previous full-cell pool.
+Standalone R analysis scripts retain the legacy full-cell pool.
 }
 \examples{
 \dontrun{
+all_xy <- matrix(runif(2000, 0, 500), ncol = 2)
+all_samples <- rep(c("s1", "s2"), each = 500)
+target_mask <- rep(c(rep(TRUE, 50), rep(FALSE, 450)), 2)
 result <- run_permutation_test(
   counts = rpois(100, 5),
-  coords_target = matrix(runif(200), ncol = 2),
-  coords_all = matrix(runif(2000), ncol = 2),
-  sample_ids = rep(c("s1", "s2"), each = 50),
+  coords_target = all_xy[target_mask, ],
+  coords_all = all_xy,
+  sample_ids = all_samples[target_mask],
   n_perms = 100,
   observed_coef = -0.005,
-  sample_ids_all = rep(c("s1", "s2"), each = 500),
+  sample_ids_all = all_samples,
   query_per_sample = c(s1 = 50, s2 = 60),
+  target_mask_all = target_mask,
   k_neighbors = 1,
   total_counts = rpois(100, 5000)
 )

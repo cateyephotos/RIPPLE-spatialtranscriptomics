@@ -19,7 +19,9 @@ run_permutation_tests(
   max_distance_um,
   min_cells_per_sample,
   min_expr_cells,
-  total_counts_target
+  total_counts_target,
+  permutation_pool = c("non_target", "all"),
+  target_mask_all = NULL
 )
 }
 \arguments{
@@ -49,7 +51,8 @@ per gene (names = gene names).}
 \item{k_neighbors}{Integer. Number of nearest neighbors for distance
 calculation.}
 
-\item{max_distance_um}{Numeric. Maximum distance in micrometers.}
+\item{max_distance_um}{Numeric. Distance cap in micrometers; farther target
+cells remain in the fit at this distance.}
 
 \item{min_cells_per_sample}{Integer. Minimum target cells per sample for
 GLM fitting.}
@@ -58,9 +61,19 @@ GLM fitting.}
 
 \item{total_counts_target}{Numeric vector. Total UMI counts per target cell
 (for Poisson offset).}
+
+\item{permutation_pool}{Candidate population for pseudo-query cells:
+\code{"non_target"} (default) excludes the target population, keeping
+query and target roles distinct; \code{"all"} reproduces the previous
+full-cell-pool sampling, including target cells.}
+
+\item{target_mask_all}{Logical vector aligned with \code{coords_all}, marking
+every cell of the target population. Required for \code{"non_target"}.
+Exclusion uses cell identity, not coordinate matching.}
 }
 \value{
-A \code{data.table} with columns \code{gene} and \code{perm_pval}.
+A \code{data.table} with columns \code{gene}, \code{perm_pval},
+and \code{permutation_pool}.
 }
 \description{
 Batch version of \code{\link{run_permutation_test}} that loops over a vector
@@ -79,6 +92,7 @@ perm_dt <- run_permutation_tests(
   sample_ids_target = target_samples,
   sample_ids_all = all_samples,
   query_per_sample = c(s1 = 50, s2 = 60),
+  target_mask_all = all_celltypes == "T_cell", # aligned with all_xy
   observed_coefs = c(Cxcl12 = -0.005, Ccl21a = -0.003),
   n_perms = 500,
   k_neighbors = 1,

@@ -98,9 +98,14 @@ for (ct in CELL_TYPES) {
     message("  [NOTE] ", ct, ": ", n_had_pval, " genes already had perm_pval; overwriting with GPU results")
   }
 
-  # Remove old perm_pval column and merge new one
-  meta[, perm_pval := NULL]
-  meta <- merge(meta, perm[, .(gene, perm_pval)], by = "gene", all.x = TRUE)
+  # Replace p-values and pool provenance together; old imports have no pool label.
+  if (!"permutation_pool" %in% names(perm)) {
+    perm[, permutation_pool := "unspecified"]
+  }
+  old_columns <- intersect(c("perm_pval", "permutation_pool"), names(meta))
+  if (length(old_columns)) meta[, (old_columns) := NULL]
+  meta <- merge(meta, perm[, .(gene, perm_pval, permutation_pool)],
+                by = "gene", all.x = TRUE)
   setDT(meta)
 
   # Summary stats

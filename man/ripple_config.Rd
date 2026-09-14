@@ -34,8 +34,8 @@ Available options (shown without the \code{ripple.} prefix):
 (default: \code{""} = all)}
 \item{k_neighbors}{Number of nearest query cells for distance
 (default: \code{1})}
-\item{max_distance_um}{Maximum distance in micrometers
-(default: \code{200})}
+\item{max_distance_um}{Distance cap in micrometers
+(default: \code{200}); farther cells remain in the model at this distance.}
 \item{fdr_threshold}{FDR significance cutoff
 (default: \code{0.05})}
 \item{min_cells_per_sample}{Minimum cells of target type per sample

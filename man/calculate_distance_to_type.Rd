@@ -4,7 +4,7 @@
 \alias{calculate_distance_to_type}
 \title{Calculate distance to nearest cell of a given type}
 \usage{
-calculate_distance_to_type(coords, cell_types, target_type)
+calculate_distance_to_type(coords, cell_types, target_type, sample_ids)
 }
 \arguments{
 \item{coords}{Numeric matrix of spatial coordinates for all cells (n x 2).}
@@ -12,20 +12,37 @@ calculate_distance_to_type(coords, cell_types, target_type)
 \item{cell_types}{Character vector of cell type labels (length n).}
 
 \item{target_type}{Character. The cell type to measure distance to.}
+
+\item{sample_ids}{Vector of length n giving the sample each cell belongs to.
+Required. The search is partitioned by it, so a cell can only ever match a
+target cell from its own sample. For genuinely single-sample data pass
+\code{rep("s1", nrow(coords))}.}
 }
 \value{
 A numeric vector of length n with distances. Returns \code{NA} for
-all cells if no target cells are found.
+all cells if no target cells are found anywhere, and \code{NA} for cells
+in a sample that contains no target cells.
 }
 \description{
 For each cell, computes the Euclidean distance to the nearest cell of a
 specified target type using kNN search.
 }
+\details{
+Sections routinely occupy overlapping coordinate ranges, since each
+section's coordinates start near zero in its own frame. A pooled search
+therefore returns the nearest target cell from any sample, and aggregating
+per sample afterwards does not repair it, because the damage happens
+before aggregation. There is no pooled mode: this function is a
+convenience wrapper over
+\code{\link{calculate_distance_to_type_by_sample}} that takes a cell-type
+label instead of a logical mask.
+}
 \examples{
 \dontrun{
 coords <- matrix(runif(200), ncol = 2)
 types <- sample(c("A", "B", "C"), 100, replace = TRUE)
-dists <- calculate_distance_to_type(coords, types, "A")
+dists <- calculate_distance_to_type(coords, types, "A",
+                                    sample_ids = rep("s1", 100))
 }
 
 }

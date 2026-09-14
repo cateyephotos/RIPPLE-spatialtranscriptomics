@@ -90,6 +90,11 @@ results_list <- future_lapply(target_types, function(ct) {
 names(results_list) <- target_types
 ```
 
+This subset pattern is for the core analysis (`n_permutations = 0`). For
+permutation testing, retain the full input and select `target_celltypes = ct`;
+otherwise subsetting changes the pseudo-query candidate pool. Recompute
+cross-cell-type specificity after combining all target results.
+
 `future.seed = TRUE` silences the "non-reproducible RNG" warning.
 RIPPLE calls `set.seed(42)` internally, so per-worker seeding is
 deterministic either way.
@@ -155,11 +160,10 @@ plan(sequential)
 
 ## Alternative: SLURM array jobs
 
-If you have a cluster, use `inst/slurm/run_hymy_distance_correlation_v2.sh`
-and the associated array-driven scripts. One SLURM task per cell
-type, one core per task, no `future.apply` involvement. Same fan-out
-shape as this vignette, but at the scheduler level. This is what we
-used for the CosMx and HyMy paper analyses.
+The same `run_ripple()` calls can be dispatched as one SLURM task per target.
+The bundled `hymy_distance_correlation` scripts are standalone legacy
+pipelines; their embedded inference functions do not automatically inherit
+package fixes. Use the package API for the behavior described here.
 
 ## Session info
 

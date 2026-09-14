@@ -25,6 +25,8 @@ For each cell type directory under \code{results_dir/per_celltype/}:
 \item Reads \code{permutation_pvals.csv} (GPU output with gene and perm_pval columns).
 \item Reads \code{meta_analysis_results.csv} (existing R output).
 \item Replaces any existing \code{perm_pval} column with GPU results.
+\item Replaces the recorded \code{permutation_pool} with the imported
+value, or \code{"unspecified"} if the imported file does not record it.
 \item Overwrites \code{meta_analysis_results.csv} with updated data.
 }
 

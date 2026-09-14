@@ -82,7 +82,9 @@ test_that("ripple_plot_qc assembles a dashboard from run_ripple output", {
   dir.create(out_dir)
   on.exit(unlink(out_dir, recursive = TRUE))
 
-  run_ripple(
+  # Coordinate-frame overlap is incidental here; see
+  # helper-frame-warning.R.
+  without_frame_warning(run_ripple(
     input                = ripple_mock_data,
     query_celltype       = "Tumor",
     celltype_column      = "cell_type",
@@ -92,7 +94,7 @@ test_that("ripple_plot_qc assembles a dashboard from run_ripple output", {
     min_expr_pct         = 0,
     min_expr_floor       = 10,
     verbose              = FALSE
-  )
+  ))
   results_dir <- file.path(out_dir, "ripple")
 
   # Pipeline should write the new per-cell distance file

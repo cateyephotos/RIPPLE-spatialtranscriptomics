@@ -86,7 +86,8 @@ for (b in betas) {
         bg_tested <- tcell_res[gene %in% bg_genes]
 
         tp <- sum(grad_tested$fisher_fdr < 0.05, na.rm = TRUE)
-        fn <- nrow(grad_tested) - tp
+        # Expression-filtered planted genes are missed detections too.
+        fn <- n_gradient - tp
         fp <- sum(bg_tested$fisher_fdr < 0.05, na.rm = TRUE)
         tn <- nrow(bg_tested) - fp
 
@@ -96,9 +97,11 @@ for (b in betas) {
           iteration = iter,
           seed = seed,
           n_grad_tested = nrow(grad_tested),
+          n_grad_filtered = n_gradient - nrow(grad_tested),
           n_bg_tested = nrow(bg_tested),
           tp = tp, fn = fn, fp = fp, tn = tn,
           sensitivity = tp / max(tp + fn, 1),
+          conditional_sensitivity = tp / max(nrow(grad_tested), 1),
           specificity = tn / max(tn + fp, 1),
           fdr_obs = fp / max(tp + fp, 1)
         )
@@ -117,6 +120,8 @@ summary_dt <- results_dt[, .(
   n_runs       = .N,
   mean_power   = mean(sensitivity),
   sd_power     = sd(sensitivity),
+  mean_conditional_power = mean(conditional_sensitivity),
+  mean_filter_retention = mean(n_grad_tested / n_gradient),
   mean_fdr     = mean(fdr_obs),
   mean_spec    = mean(specificity)
 ), by = .(beta, n_samples)]
@@ -126,6 +131,10 @@ print(summary_dt[order(beta, n_samples)])
 # ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
-out_path <- "data-raw/benchmarks/results/bench_power_results.rds"
+# Set RIPPLE_BENCH_DIR to choose a separate output directory.
+bench_dir <- Sys.getenv("RIPPLE_BENCH_DIR",
+                        unset = "data-raw/benchmarks/results")
+dir.create(bench_dir, recursive = TRUE, showWarnings = FALSE)
+out_path <- file.path(bench_dir, "bench_power_results.rds")
 saveRDS(list(per_run = results_dt, summary = summary_dt), file = out_path)
 cat("\nSaved:", out_path, "\n")

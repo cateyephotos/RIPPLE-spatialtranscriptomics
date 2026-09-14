@@ -80,3 +80,23 @@ inst/slurm/bench_nichede_*.sh
 inst/slurm/bench_ripple_allct.sh
 inst/slurm/bench_ripple_contamination.sh
 inst/slurm/_debug_*.sh
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Keep local analysis outputs out of version control.
+data-raw/xenium_tdln/*
+!data-raw/xenium_tdln/*.R
+!data-raw/xenium_tdln/.gitignore
+
+# Local analysis outputs
+data-raw/cosmx_nsclc/revision/
+data-raw/benchmarks/revision/
+
+# Local rendering inputs
+data-raw/revision_extdata/
+
+# Codex instructions and project memory, local only
+/AGENTS.md
+/.agent-memory/

@@ -25,7 +25,7 @@ all cells of a specified query type.
 \dontrun{
 coords <- matrix(runif(200), ncol = 2)
 types <- sample(c("A", "B", "C"), 100, replace = TRUE)
-knn <- build_knn_graph(coords, k = 10)
+knn <- build_knn_graph(coords, k = 10, sample_ids = rep("s1", 100))
 comp <- calculate_neighbor_composition(types, "A", knn)
 }
 

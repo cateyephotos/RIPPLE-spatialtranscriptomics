@@ -15,7 +15,9 @@ check_spatial_autocorrelation(
   max_distance_um = 200,
   x_column = NULL,
   y_column = NULL,
-  verbose = TRUE
+  verbose = TRUE,
+  k_neighbors = 1,
+  min_cells_per_sample = 30
 )
 }
 \arguments{
@@ -35,13 +37,22 @@ an \code{.rds} file containing one).}
 \item{k}{Number of nearest neighbors for the spatial weights matrix
 (default: 20).}
 
-\item{max_distance_um}{Maximum distance to consider (default: 200).}
+\item{max_distance_um}{Distance cap in micrometers (default: 200, or
+\code{ripple_config()}). More distant target cells are retained at the cap,
+matching \code{run_ripple()}; use the same value as the main analysis.}
 
 \item{x_column}{X coordinate column (default: NULL, auto-detect).}
 
 \item{y_column}{Y coordinate column (default: NULL, auto-detect).}
 
 \item{verbose}{Print progress (default: TRUE).}
+
+\item{k_neighbors}{Number of nearest query cells whose distances are averaged
+(default: 1, or \code{ripple_config()}). Match the main analysis. This is
+separate from \code{k}, which controls the residual spatial weights.}
+
+\item{min_cells_per_sample}{Minimum target cells per sample (default: 30, or
+\code{ripple_config()}). At least \code{k + 1} usable cells are also needed.}
 }
 \value{
 A \code{data.table} with columns:
@@ -63,15 +74,17 @@ independence assumption is violated and per-sample p-values may be
 anti-conservative.
 }
 \details{
-This is a diagnostic tool — it does not fix the autocorrelation, but
-lets you assess its severity for specific genes. RIPPLE's per-sample
-fitting + Fisher's method already mitigates pseudoreplication at the
-sample level (N = biological replicates, not cells).
+This diagnostic assesses residual spatial structure for selected genes.
+It does not correct autocorrelation or recalibrate the Wald p-values.
+Use the same input subset, query-neighbor count and distance cap as in
+the main analysis. Requested genes are refitted without repeating the
+cross-sample expression filter; each fit requires five expressing cells.
 
 For each gene and sample, the function:
 \enumerate{
-\item Subsets to target cells within \code{max_distance_um} of the
-nearest query cell.
+\item Selects target cells and calculates mean distance to the nearest
+\code{k_neighbors} query cells within the same sample. Distances are
+capped at \code{max_distance_um}, without excluding more distant cells.
 \item Fits the same Poisson GLM as \code{\link{fit_poisson}}.
 \item Extracts deviance residuals.
 \item Builds a k-nearest-neighbor spatial weights matrix.
@@ -80,11 +93,14 @@ nearest query cell.
 
 Interpretation thresholds:
 \itemize{
-\item \code{|I| < 0.05}: "none" — independence assumption holds.
-\item \code{0.05 <= |I| < 0.15}: "weak" — minor concern.
-\item \code{0.15 <= |I| < 0.30}: "moderate" — p-values may be inflated.
-\item \code{|I| >= 0.30}: "strong" — interpret with caution.
+\item \code{|I| < 0.05}: "none".
+\item \code{0.05 <= |I| < 0.15}: "weak".
+\item \code{0.15 <= |I| < 0.30}: "moderate".
+\item \code{|I| >= 0.30}: "strong".
 }
+These descriptive labels do not establish independence or calibrated
+inference. Samples with insufficient cells or failed fits/tests are reported
+with missing statistics and an explanatory \code{interpretation} value.
 }
 \examples{
 \dontrun{

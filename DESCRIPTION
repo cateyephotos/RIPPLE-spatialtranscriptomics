@@ -1,6 +1,6 @@
 Package: ripple
 Title: Replicate-Aware Inference of Paracrine Profiles via Likelihood Estimation
-Version: 0.1.0
+Version: 0.2.0
 Authors@R:
     person("Carolina", "Mangana", role = c("aut", "cre"),
            email = "cmangana@cemm.at",
@@ -26,6 +26,7 @@ Imports:
     ggplot2 (>= 3.3),
     patchwork (>= 1.1),
     RANN (>= 2.6),
+    BiocNeighbors,
     Matrix (>= 1.3),
     scales (>= 1.1),
     ggrepel (>= 0.9)
@@ -41,6 +42,7 @@ Suggests:
     spdep (>= 1.2),
     R.utils,
     withr,
+    future,
     future.apply,
     testthat (>= 3.0),
     knitr,

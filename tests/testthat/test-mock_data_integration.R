@@ -23,7 +23,9 @@ test_that("run_ripple recovers the planted gradient on ripple_mock_data", {
   dir.create(out_dir)
   on.exit(unlink(out_dir, recursive = TRUE))
 
-  results <- run_ripple(
+  # Coordinate-frame overlap is incidental here; see
+  # helper-frame-warning.R.
+  results <- without_frame_warning(run_ripple(
     input                = ripple_mock_data,
     query_celltype       = "Tumor",
     celltype_column      = "cell_type",
@@ -33,7 +35,7 @@ test_that("run_ripple recovers the planted gradient on ripple_mock_data", {
     min_expr_pct         = 0,
     min_expr_floor       = 10,
     verbose              = FALSE
-  )
+  ))
 
   expect_true(is.data.frame(results))
   expect_true(all(c(

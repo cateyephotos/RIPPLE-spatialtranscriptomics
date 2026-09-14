@@ -66,6 +66,7 @@ export ADATA_PATH="${ADATA_PATH:-}"
 export CELLTYPE_INDEX=${SLURM_ARRAY_TASK_ID}
 export N_PERMUTATIONS=${N_PERMUTATIONS:-500}
 export K_NEIGHBORS=${K_NEIGHBORS:-1}
+export PERMUTATION_POOL=${PERMUTATION_POOL:-non_target}
 
 echo "=============================================="
 echo "RIPPLE Stage 2: GPU Permutation Testing - Array Job"
@@ -74,6 +75,7 @@ echo "Cell Type Index: ${CELLTYPE_INDEX}"
 echo "Analysis Name: ${ANALYSIS_NAME:-hymy_distance_correlation}"
 echo "K Neighbors: ${K_NEIGHBORS}"
 echo "N Permutations: ${N_PERMUTATIONS}"
+echo "Permutation Pool: ${PERMUTATION_POOL}"
 echo "CPUs: ${SLURM_CPUS_PER_TASK}"
 echo "Date: $(date)"
 echo "=============================================="

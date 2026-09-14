@@ -370,7 +370,7 @@ NULL
 .check_integer_counts <- function(counts, assay_name = NULL,
                                   n_sample = 1000) {
   if (!nrow(counts) || !ncol(counts)) return(invisible(NULL))
-  vals <- if (inherits(counts, "Matrix") && .hasSlot(counts, "x")) {
+  vals <- if (inherits(counts, "Matrix") && methods::.hasSlot(counts, "x")) {
     utils::head(counts@x, n_sample)
   } else {
     utils::head(as.numeric(counts), n_sample)
