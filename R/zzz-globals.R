@@ -18,7 +18,7 @@ utils::globalVariables(c(
   "neg_log10_fdr", "neg_log10_fdr_capped", "neg_log10_padj",
   "nichenet_activity",
   "obj", "odds_ratio",
-  "padj", "pathway", "pathway_clean", "pct_expr", "perm_pval",
+  "padj", "pathway", "pathway_clean", "pct_expr", "perm_pval", "permutation_pool",
   "plot_color", "pval", "pvalue_fisher",
   "ratio", "receptor", "receptor_pct_target",
   "sample_id", "scaled_activity", "scaled_direct",

@@ -7,6 +7,8 @@
 test_that("per-celltype fan-out via future_lapply matches a single run_ripple call", {
   skip_if_not_installed("SpatialExperiment")
   skip_if_not_installed("future.apply")
+  skip_if_not_installed("future")
+  skip_if_not_installed("withr")
   skip_on_cran()
 
   data(ripple_mock_data)

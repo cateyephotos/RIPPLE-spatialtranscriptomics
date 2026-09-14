@@ -318,8 +318,8 @@ To make pathway enrichment ignore `broad`-class genes, pass
 `exclude_broad = TRUE` to `run_ripple_fgsea()`. Read the "Limitations
 of the broad-class filter" section in `?run_ripple_fgsea` first. Run
 with and without the filter before reporting. The
-[CosMx walkthrough](cosmx_nsclc_walkthrough.html) shows a side-by-side
-comparison.
+[CosMx walkthrough](cosmx_nsclc_walkthrough.html) shows the filtered
+results and code for comparing both settings.
 
 > **Note on the broad-class dials.** `classify_gene_specificity()`
 > has two. `broad_threshold` sets how many cell types a gene must hit
@@ -406,8 +406,9 @@ the specificity check, the QC dashboard. The stages below are
 - **Permutation testing**, `run_permutation_tests()` (or set
   `n_permutations` in `run_ripple()`). Builds an empirical null for
   query-location specificity using non-target pseudo-query cells.
-  `permutation_pool = "all"` retains the previous full-cell pool, also
-  used by the standalone GPU script. Direct calls require `target_mask_all`.
+  `permutation_pool = "all"` retains the previous full-cell pool. The GPU
+  script also defaults to non-target candidates (`--permutation-pool all`
+  selects its previous pool). Direct R calls require `target_mask_all`.
 - **Pathway enrichment**, `run_ripple_fgsea()`. Summarises gradient
   genes as enriched pathways instead of a gene list.
 - **Ligand-receptor integration**, `run_ripple_lr()`. Maps gradient

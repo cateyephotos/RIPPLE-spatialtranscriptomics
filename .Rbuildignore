@@ -1,6 +1,8 @@
 ^\.claude$
 ^\.github$
+^\.git$
 ^README\.md$
+^LICENSE$
 ^LICENSE\.md$
 ^\.Rproj\.user$
 ^.*\.Rproj$
@@ -30,7 +32,6 @@
 ^inst/extdata/ksweep_T_cell_all_results\.rds$
 ^inst/extdata/cosmx_cached/.*stale-gradient_score-backup\.csv$
 ^inst/extdata/cosmx_cached/.*_unfiltered\.csv$
-^inst/extdata/cosmx_cached/k_diagnostics_cosmx\.csv$
 ^inst/slurm/bench_b_cells_only\.sh$
 ^inst/slurm/bench_nnsvg_real_.*\.sh$
 ^inst/slurm/bench_nichede_.*\.sh$

@@ -35,6 +35,7 @@ For each gene in each target cell type, RIPPLE fits a per-sample Poisson GLM wit
 **Supported platforms:** Xenium, CosMx, MERFISH, etc. Suited to any imaging-based platform with single-cell resolved coordinates and integer counts. Not designed for spot-resolution platforms (e.g. Visium without deconvolution) where one spot mixes multiple cell types.
 
 ---
+**Note**: For users of v0.1.0, there are important updates and bug fixes in v0.2.0, so we recommend updating!
 
 ## Installation
 
@@ -109,7 +110,7 @@ Four vignettes ship with the package:
 | Vignette | Description |
 |----------|-------------|
 | `getting_started` | 5-minute end-to-end run on the bundled synthetic dataset. The fastest way to see what RIPPLE does. |
-| `cosmx_nsclc_walkthrough` | Applied walkthrough on public CosMx NSCLC data (He et al., 2022). Uses historical bundled results for illustration; these predate the latest manuscript reanalysis. |
+| `cosmx_nsclc_walkthrough` | Applied walkthrough on public CosMx NSCLC data (He et al., 2022), using refreshed bundled gradient, pathway and ligand-receptor results. |
 | `parallelization` | How to fan out `run_ripple()` over cell types on a multi-core machine using `future.apply`. For large datasets where a single-core run would take hours. |
 | `benchmarks` | FDR calibration, power curves, and runtime measurements from the synthetic benchmark suite. |
 
@@ -130,7 +131,7 @@ Each stage is optional except Stage 1.
 |-------|-------------|---------|
 | 1. Distance correlation | `run_ripple()` | Per-sample Poisson GLM + Fisher combined p-value with sign-consistency gate |
 | 2. Merge and summarize | `merge_ripple_results()`, `compute_fisher_pval()` | Combines per-celltype results, recomputes Fisher p-values. IF you run_ripple(), you will get these out too, but you can use these functions if your run gets interrupted, for ex. |
-| 3. Permutation validation | `run_ripple(n_permutations = ...)` or `run_permutation_tests()` | Tests query-location specificity of the median coefficient using non-target pseudo-query candidates. The standalone GPU script retains the legacy full-cell pool. |
+| 3. Permutation validation | `run_ripple(n_permutations = ...)` or `run_permutation_tests()` | Tests query-location specificity of the median coefficient using non-target pseudo-query candidates. The GPU script uses the same candidate pool by default. |
 | 4. Confounder control | `run_ripple_confounder()` | Bivariate GLM isolating query-specific from shared-niche effects |
 | 5. Atlas figures | `run_ripple_atlas()`, `run_ripple_fgsea()`, `plot_gradient_volcano()`, `plot_gradient_curve()` | Multi-panel figures, pathway enrichment, contamination flagging |
 | 6. Ligand-receptor integration | `run_ripple_lr()`, `classify_lr_artifacts()` | Matches gradient genes to L-R pairs via NicheNet |
@@ -163,7 +164,12 @@ Within-sample Wald p-values depend on the Poisson variance and cell-independence
 
 ### Updating existing workflows
 
-- Optional R permutation tests now use `permutation_pool = "non_target"`. `run_ripple()` supplies cell identities automatically; direct calls to `run_permutation_test()` or `run_permutation_tests()` require `target_mask_all`, aligned with `coords_all`. Use `permutation_pool = "all"` for the previous full-cell-pool null. The standalone R/GPU scripts still use that legacy pool. Imported results without a pool label are marked `"unspecified"`.
+- GPU permutation tests read `median_coef` from package results. Legacy results
+  require the accompanying `coef_per_sample.csv` to reconstruct observed
+  medians. Poisson fits use `layers['counts']` when present, otherwise raw
+  counts in `.X`, for both expression and the library-size offset.
+
+- Optional R permutation tests now use `permutation_pool = "non_target"`. `run_ripple()` supplies cell identities automatically; direct calls to `run_permutation_test()` or `run_permutation_tests()` require `target_mask_all`, aligned with `coords_all`. Use `permutation_pool = "all"` for the previous full-cell-pool null. The GPU script also defaults to non-target candidates; select its previous pool with `--permutation-pool all` or `PERMUTATION_POOL=all`. GPU outputs record the pool, and imported results without a label are marked `"unspecified"`. Standalone R analysis scripts still use the full pool.
 - For `check_spatial_autocorrelation()`, pass the same input subset, `k_neighbors`, `max_distance_um`, and sample settings used for the main analysis. Its separate `k` argument controls the Moran neighbor graph. A small Moran's I does not establish independence.
 - Confounder fits with indistinguishable distance predictors are excluded and recorded as `fit_status = "rank_deficient"`. Check `stage2_n_rank_deficient`; fewer than two valid fits yields `no_stage2_result`.
 

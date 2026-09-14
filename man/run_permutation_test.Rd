@@ -103,8 +103,9 @@ among non-target cells. It does not test specificity against a particular
 alternative cell type. Too few non-target candidates raises an error rather
 than changing the query count or falling back to the full pool.
 Fisher combination and the sign gate are not applied to permutations.
-The standalone R and GPU scripts retain the legacy full-cell pool;
-their null is not the default non-target null used by these package APIs.
+The GPU script also defaults to non-target candidates; use its
+\code{--permutation-pool all} option for the previous full-cell pool.
+Standalone R analysis scripts retain the legacy full-cell pool.
 }
 \examples{
 \dontrun{

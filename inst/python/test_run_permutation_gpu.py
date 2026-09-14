@@ -301,6 +301,7 @@ def test_end_to_end(device, ctx, fixture):
             n_perms=int(r_sum["n_perms"]), device=device,
             rng=np.random.default_rng(22), k_neighbors=1,
             use_poisson=True, log_total_counts_target=ctx["log_off"],
+            permutation_pool="all",  # historical R fixture uses the full pool
         )
         # The R reference reaches p ~ 0.02 on this fixture. This permutation
         # scheme has limited power against a focal-cluster query even with
@@ -332,6 +333,7 @@ def test_end_to_end(device, ctx, fixture):
             n_perms=int(r_sum["n_perms"]), device=device,
             rng=np.random.default_rng(21), k_neighbors=1,
             use_poisson=True, log_total_counts_target=ctx["log_off"],
+            permutation_pool="all",  # historical R fixture uses the full pool
         )
         check("null gene: p is not significant", p_null > 0.05,
               "p=%.4f" % p_null)
